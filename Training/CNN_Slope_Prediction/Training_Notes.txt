@@ -1,0 +1,6 @@
+All training folds are in the drive of: passiatorewisefrancesco@gmail.com
+
+
+"C:\Users\frank\OneDrive\Desktop\Sorted Progression\Progression\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr.zip"
+
+Was used for Comprehensive_Model_Comparison
