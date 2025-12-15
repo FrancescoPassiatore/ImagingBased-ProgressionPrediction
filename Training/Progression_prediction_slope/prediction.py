@@ -41,67 +41,21 @@ def aggregate_patient_slope(slice_slopes: np.ndarray) :
 
     return np.mean(slice_slopes)
    
-def correct_slope_with_features(slope_cnn, features_dict, corrector_model, scaler, device='cuda'):
+def correct_slope_with_features(slope_cnn, features_dict, corrector_model, scaler,feature_cols, device='cuda'):
     """
     Correct slope using the full feature set in EXACT training order
     """
     
-    # Build feature vector in EXACT same order as training (get_full_features)
-    feature_vector = np.array([
-        slope_cnn,
-        # Demographics
-        features_dict.get('age', 0.0),
-        features_dict.get('sex', 0.0),
-        features_dict.get('smoking_status', 0.0),
-        # Handcrafted
-        features_dict.get('approx_vol', 0.0),
-        features_dict.get('avg_num_tissue_pixel', 0.0),
-        features_dict.get('avg_tissue', 0.0),
-        features_dict.get('avg_tissue_thickness', 0.0),
-        features_dict.get('avg_tissue_by_total', 0.0),
-        features_dict.get('avg_tissue_by_lung', 0.0),
-        features_dict.get('mean', 0.0),
-        features_dict.get('skew', 0.0),
-        features_dict.get('kurtosis', 0.0),
-    ], dtype=float)
-    
-    # Handle NaN
-    feature_vector = np.nan_to_num(feature_vector, nan=0.0)
+    feature_vector=[]
 
-    print(f"\n{'='*60}")
-    print("SCALER PARAMETERS (training statistics):")
-    print(f"{'='*60}")
-    feature_names = ['slope_cnn', 'age', 'sex', 'smoking_status', 'approx_vol', 
-                     'avg_num_tissue_pixel', 'avg_tissue', 'avg_tissue_thickness',
-                     'avg_tissue_by_total', 'avg_tissue_by_lung', 'mean', 'skew', 'kurtosis']
-    
-    for i, name in enumerate(feature_names):
-        if i < len(scaler.mean_):
-            print(f"{name:25s}: mean={scaler.mean_[i]:12.2f}, std={scaler.scale_[i]:12.2f}")
-    
-    print(f"\n{'='*60}")
-    print("CURRENT PATIENT VALUES:")
-    print(f"{'='*60}")
-    for i, name in enumerate(feature_names):
-        if i < len(feature_vector):
-            print(f"{name:25s}: raw={feature_vector[i]:12.2f}")
-    
-    print(f"\n{'='*60}")
-    
-    # Calcola manualmente la normalizzazione per il primo valore problematico
-    approx_vol_raw = feature_vector[4]
-    approx_vol_mean = scaler.mean_[4]
-    approx_vol_std = scaler.scale_[4]
-    approx_vol_normalized = (approx_vol_raw - approx_vol_mean) / approx_vol_std
-    
-    print(f"Manual check for approx_vol:")
-    print(f"  Raw value: {approx_vol_raw:.2f}")
-    print(f"  Training mean: {approx_vol_mean:.2f}")
-    print(f"  Training std: {approx_vol_std:.2f}")
-    print(f"  Normalized: ({approx_vol_raw:.2f} - {approx_vol_mean:.2f}) / {approx_vol_std:.2f} = {approx_vol_normalized:.4f}")
-    print(f"{'='*60}\n")
-    
-    feature_scaled = scaler.transform(feature_vector.reshape(1, -1))
+    for col in feature_cols:
+        if col == 'slope_cnn_mean':
+            feature_vector.append(slope_cnn)
+        else:
+            feature_vector.append(features_dict.get(col, 0.0))  # Default to 0.0 if missing
+
+    feature_vector = np.array(feature_vector, dtype=float)
+    feature_vector = np.nan_to_num(feature_vector, nan=0.0)
     
     # CRITICAL: reshape to (1, n_features) for single sample
     feature_scaled = scaler.transform(feature_vector.reshape(1, -1))
@@ -489,11 +443,11 @@ if __name__ == "__main__":
     cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
     cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
     
-    corrector_model = FlexibleSlopeCorrector(input_dim=13)
-    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\corrector_final.pth', map_location=torch.device('cpu')))
+    corrector_model = SlopeCorrector(input_dim=13)
+    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\corrector_full.pth', map_location=torch.device('cpu')))
     
     # Load scaler
-    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\scaler.pkl', 'rb') as f:
+    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\scaler_full.pkl', 'rb') as f:
         scaler, _ = pickle.load(f)
 
     # Paths
