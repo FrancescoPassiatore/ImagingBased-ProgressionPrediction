@@ -11,7 +11,7 @@ Pipeline Flow:
 Progression Definition (Standard IPF Clinical Criteria):
 - ≥10% relative decline in FVC from baseline within follow-up period
 """
-
+import pickle
 import torch
 import torch.nn as nn
 import numpy as np
@@ -19,7 +19,9 @@ import pandas as pd
 from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 #Get utilites from utilities.py
-from .utilities import *
+from utilities import *
+
+from torch.utils.data import Dataset, DataLoader
 
 
 #Progression Thresholds
@@ -39,14 +41,19 @@ def aggregate_patient_slope(slice_slopes: np.ndarray) :
 
     return np.mean(slice_slopes)
    
-def correct_slope_with_features(slope_cnn,features_dict,corrector_model,scaler,device='cuda'):
-
-    #Bild features vector
+def correct_slope_with_features(slope_cnn, features_dict, corrector_model, scaler, device='cuda'):
+    """
+    Correct slope using the full feature set in EXACT training order
+    """
+    
+    # Build feature vector in EXACT same order as training (get_full_features)
     feature_vector = np.array([
         slope_cnn,
+        # Demographics
         features_dict.get('age', 0.0),
         features_dict.get('sex', 0.0),
         features_dict.get('smoking_status', 0.0),
+        # Handcrafted
         features_dict.get('approx_vol', 0.0),
         features_dict.get('avg_num_tissue_pixel', 0.0),
         features_dict.get('avg_tissue', 0.0),
@@ -57,13 +64,52 @@ def correct_slope_with_features(slope_cnn,features_dict,corrector_model,scaler,d
         features_dict.get('skew', 0.0),
         features_dict.get('kurtosis', 0.0),
     ], dtype=float)
-
     
-    # Handle NaN -> replace with mean value
+    # Handle NaN
     feature_vector = np.nan_to_num(feature_vector, nan=0.0)
 
-    # Scale features
-    feature_scaled = scaler.transform([feature_vector])
+    print(f"\n{'='*60}")
+    print("SCALER PARAMETERS (training statistics):")
+    print(f"{'='*60}")
+    feature_names = ['slope_cnn', 'age', 'sex', 'smoking_status', 'approx_vol', 
+                     'avg_num_tissue_pixel', 'avg_tissue', 'avg_tissue_thickness',
+                     'avg_tissue_by_total', 'avg_tissue_by_lung', 'mean', 'skew', 'kurtosis']
+    
+    for i, name in enumerate(feature_names):
+        if i < len(scaler.mean_):
+            print(f"{name:25s}: mean={scaler.mean_[i]:12.2f}, std={scaler.scale_[i]:12.2f}")
+    
+    print(f"\n{'='*60}")
+    print("CURRENT PATIENT VALUES:")
+    print(f"{'='*60}")
+    for i, name in enumerate(feature_names):
+        if i < len(feature_vector):
+            print(f"{name:25s}: raw={feature_vector[i]:12.2f}")
+    
+    print(f"\n{'='*60}")
+    
+    # Calcola manualmente la normalizzazione per il primo valore problematico
+    approx_vol_raw = feature_vector[4]
+    approx_vol_mean = scaler.mean_[4]
+    approx_vol_std = scaler.scale_[4]
+    approx_vol_normalized = (approx_vol_raw - approx_vol_mean) / approx_vol_std
+    
+    print(f"Manual check for approx_vol:")
+    print(f"  Raw value: {approx_vol_raw:.2f}")
+    print(f"  Training mean: {approx_vol_mean:.2f}")
+    print(f"  Training std: {approx_vol_std:.2f}")
+    print(f"  Normalized: ({approx_vol_raw:.2f} - {approx_vol_mean:.2f}) / {approx_vol_std:.2f} = {approx_vol_normalized:.4f}")
+    print(f"{'='*60}\n")
+    
+    feature_scaled = scaler.transform(feature_vector.reshape(1, -1))
+    
+    # CRITICAL: reshape to (1, n_features) for single sample
+    feature_scaled = scaler.transform(feature_vector.reshape(1, -1))
+    
+    print(f"Scaled features (first 5): {feature_scaled[0, :5]}")
+    print(f"  scaled_slope_cnn={feature_scaled[0, 0]:.4f}")
+    
+    # Convert to tensor
     feature_tensor = torch.tensor(feature_scaled, dtype=torch.float32).to(device)
     
     # Predict corrected slope
@@ -72,7 +118,7 @@ def correct_slope_with_features(slope_cnn,features_dict,corrector_model,scaler,d
         slope_corrected = corrector_model(feature_tensor).cpu().item()
     
     return slope_corrected
-
+    
 def predict_fvc_trajectory(baseline_fvc, slope, weeks):
     """
     Step 4: Predict FVC at future timepoints using linear model
@@ -108,12 +154,13 @@ def classify_progression(baseline_fvc, future_fvc, threshold_percent=10.0):
     
     is_progression = decline_percent >= threshold_percent
     
-    return is_progression, decline_percen
+    return is_progression, decline_percent
 
 class ProgressionPredictor:
     """
     Complete pipeline for IPF progression prediction
     """
+    
     
     def __init__(self, cnn_model, corrector_model, scaler, 
                  patient_data, features_data, slope_scaler=None,
@@ -168,16 +215,31 @@ class ProgressionPredictor:
         slope_predictions = predict_slope_from_cnn(self.cnn, images, self.device)
         
         # Step 2: Aggregate to patient-level
-        slope_cnn = aggregate_patient_slope(slope_predictions, aggregation='mean')
+        slope_cnn = aggregate_patient_slope(slope_predictions)
         
         # Step 3: Apply corrector (optional)
         if use_corrector and self.corrector is not None:
             features_dict = self.features_data.get(patient_id, {})
+    
+            print(f"\n{'='*60}")
+            print(f"Patient {patient_id} - Feature Correction")
+            print(f"{'='*60}")
+            print(f"Input slope_cnn (normalized): {slope_cnn:.4f}")
+            
             slope_final_norm = correct_slope_with_features(
-                slope_cnn, features_dict, self.corrector, self.scaler, self.device
+                slope_cnn, 
+                features_dict, 
+                self.corrector, 
+                self.scaler,
+                self.device
             )
+            
+            print(f"Output slope_final_norm: {slope_final_norm:.4f}")
+            print(f"{'='*60}\n")
         else:
             slope_final_norm = slope_cnn
+
+        print(f"Post-feature_correction: Patient {patient_id}: Slope CNN={slope_cnn:.3f}, Slope Final Norm={slope_final_norm:.3f}")
         
         # Denormalize slope
         if self.slope_scaler is not None:
@@ -189,7 +251,7 @@ class ProgressionPredictor:
         pdata = self.patient_data[patient_id]
         baseline_fvc = pdata['fvc_values'][0]  # First measurement
         baseline_week = pdata['weeks'][0]
-        
+        PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 60, 72, 84, 96]  # weeks
         # Predict at standard timepoints
         future_weeks = np.array(PROGRESSION_TIMEPOINTS)
         weeks_from_baseline = future_weeks - baseline_week
@@ -412,17 +474,203 @@ def plot_progression_predictions(predictor, test_dataset, patient_ids,
 # =============================================================================
 
 if __name__ == "__main__":
+    import warnings
+
+    # Disabilita tutti i warning
+    warnings.filterwarnings('ignore')
+
+    # Oppure disabilita solo i warning specifici
+    warnings.filterwarnings('ignore', category=UserWarning)
+
+    # Oppure ancora più specifico
+    warnings.filterwarnings('ignore', message='X does not have valid feature names')
 
     # 1. Load models
-    cnn_model = utilites.ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
-    cnn_model.load_state_dict(torch.load('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth'))
+    cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
+    cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
     
     corrector_model = FlexibleSlopeCorrector(input_dim=13)
-    corrector_model.load_state_dict(torch.load('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\corrector_final.pth'))
+    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\corrector_final.pth', map_location=torch.device('cpu')))
     
     # Load scaler
-    with open('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\scaler.pkl', 'rb') as f:
+    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\scaler.pkl', 'rb') as f:
         scaler, _ = pickle.load(f)
+
+    # Paths
+    CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
+    CSV_FEATURES_PATH = 'Training/CNN_Slope_Prediction/patient_features.csv'
+    NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
+
+    # Hyperparameters
+    IMAGE_SIZE = (224, 224)
+    PATIENTS_PER_BATCH = 4
+
+    # Device
+    device = "cuda" 
+
+    print(torch.__version__)
+    print(torch.cuda.is_available())  # Should return True if CUDA is available
+
+    # STEP 2: LOAD DATA
+
+    print("\n" + "="*80)
+    print("[1/10] LOADING DATA")
+    print("="*80)
+
+    dl = IPFDataLoader(CSV_PATH, CSV_FEATURES_PATH, NPY_DIR)
+    patient_data, features_data = dl.get_patient_data()
+
+    print(f"\n✓ Loaded patient_data for {len(patient_data)} patients")
+    print(f"✓ Loaded features_data for {len(features_data)} patients")
+
+    # Verify data structure
+    sample_patient = list(patient_data.keys())[0]
+    print(f"\n📋 Sample patient data structure (ID: {sample_patient}):")
+    for key, value in patient_data[sample_patient].items():
+        if isinstance(value, list):
+            print(f"   {key}: list with {len(value)} items")
+        else:
+            print(f"   {key}: {type(value).__name__} = {value}")
+
+    print(f"\n📋 Sample feature data structure:")
+    for key, value in features_data[sample_patient].items():
+        print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
+
+    # =============================================================================
+    # STEP 3: TRAIN/TEST SPLIT
+    # =============================================================================
+
+    print("\n" + "="*80)
+    print("[2/10] CREATING TRAIN/TEST SPLIT")
+    print("="*80)
+
+    all_patients = list(patient_data.keys())
+    print(f"\n✓ Total patients available: {len(all_patients)}")
+
+    # Recreate exact same split as training
+    np.random.seed(42)
+    np.random.shuffle(all_patients)
+
+    test_size = int(len(all_patients) * 0.2)
+    test_patients = all_patients[:test_size]
+    train_patients = all_patients[test_size:]
+
+    print(f"✓ Train patients: {len(train_patients)}")
+    print(f"✓ Test patients:  {len(test_patients)}")
+    print(f"\n📝 First 5 test patients: {test_patients[:5]}")
+    print(f"📝 First 5 train patients: {train_patients[:5]}")
+
+    # Verify no overlap
+    overlap = set(train_patients) & set(test_patients)
+    if overlap:
+        print(f"❌ ERROR: {len(overlap)} patients in both train and test!")
+    else:
+        print(f"✓ No patient overlap between train and test")
+
+    # =============================================================================
+    # STEP 4: CREATE DATASETS
+    # =============================================================================
+
+    print("\n" + "="*80)
+    print("[3/10] CREATING DATASETS")
+    print("="*80)
+
+    train_ds = IPFSliceDataset(
+        train_patients,
+        patient_data,
+        features_data,
+        normalize_slope=True,
+        image_size=IMAGE_SIZE
+    )
+
+    print(f"\n✓ Train dataset created:")
+    print(f"   Total slices: {len(train_ds)}")
+    print(f"   Patients: {len(train_ds.patients)}")
+    print(f"   Slope scaler fitted: {train_ds.slope_scaler is not None}")
+
+    test_ds = IPFSliceDataset(
+        test_patients,
+        patient_data,
+        features_data,
+        normalize_slope=True,
+        image_size=IMAGE_SIZE
+    )
+    test_ds.slope_scaler = train_ds.slope_scaler
+
+    print(f"\n✓ Test dataset created:")
+    print(f"   Total slices: {len(test_ds)}")
+    print(f"   Patients: {len(test_ds.patients)}")
+
+    # Verify slope scaler
+    if train_ds.slope_scaler:
+        print(f"\n📊 Slope normalization:")
+        print(f"   Mean: {train_ds.slope_scaler.mean_[0]:.2f} ml/week")
+        print(f"   Std:  {train_ds.slope_scaler.scale_[0]:.2f} ml/week")
+
+        # Test denormalization
+        test_norm = np.array([[0.0]])
+        test_denorm = train_ds.slope_scaler.inverse_transform(test_norm)[0][0]
+        print(f"   Test: normalized=0.0 → denormalized={test_denorm:.2f}")
+
+    # Sample a few items to verify loading
+    print(f"\n🔍 Testing dataset loading (3 random samples)...")
+    for i in np.random.choice(len(test_ds), 3, replace=False):
+        sample = test_ds[i]
+        if sample is not None:
+            print(f"   ✓ Sample {i}: image shape={sample['image'].shape}, "
+                f"slope={sample['slope'].item():.3f}, patient={sample['patient_id'][:10]}...")
+        else:
+            print(f"   ❌ Sample {i}: Failed to load")
+
+    # =============================================================================
+    # STEP 5: CREATE DATALOADERS
+    # =============================================================================
+
+    print("\n" + "="*80)
+    print("[4/10] CREATING DATALOADERS")
+    print("="*80)
+
+    train_loader = DataLoader(
+            train_ds,
+            batch_sampler=PatientBatchSampler(
+                train_ds,
+                patients_per_batch=PATIENTS_PER_BATCH,
+                shuffle=True  # ✓ Shuffle for training
+            ),
+            collate_fn=patient_group_collate,
+            num_workers=4,
+            pin_memory=True
+        )
+
+    test_loader = DataLoader(
+        test_ds,
+        batch_sampler=PatientBatchSampler(
+            test_ds,
+            patients_per_batch=PATIENTS_PER_BATCH,
+            shuffle=False
+        ),
+        collate_fn=patient_group_collate,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    print(f"\n✓ Test loader created:")
+    print(f"   Total batches: {len(test_loader)}")
+    print(f"   Patients per batch: {PATIENTS_PER_BATCH}")
+
+    # Test loading one batch
+    print(f"\n🔍 Testing batch loading...")
+    try:
+        test_batch = next(iter(test_loader))
+        print(f"   ✓ Batch loaded successfully")
+        print(f"   Images shape: {test_batch['images'].shape}")
+        print(f"   Slopes shape: {test_batch['slopes'].shape}")
+        print(f"   Patients in batch: {len(test_batch['patient_ids'])}")
+        print(f"   Patient IDs: {test_batch['patient_ids']}")
+        print(f"   Lengths: {test_batch['lengths'].tolist()}")
+    except Exception as e:
+        print(f"   ❌ Error loading batch: {e}")
+
     
     # 2. Initialize predictor
     predictor = ProgressionPredictor(
@@ -431,7 +679,7 @@ if __name__ == "__main__":
         scaler=scaler,
         patient_data=patient_data,
         features_data=features_data,
-        slope_scaler=slope_scaler,
+        slope_scaler=train_ds.slope_scaler,
         device='cuda'
     )
     

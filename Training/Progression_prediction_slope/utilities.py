@@ -1,3 +1,22 @@
+import os
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import glob
+import cv2
+import copy
+import random
+from collections import defaultdict
+from typing import Dict, List
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset, Sampler
+import timm
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+
 class IPFDataLoader:
     """Carica e prepara i dati dal CSV"""
 
@@ -708,6 +727,7 @@ class ImprovedSlopeTrainer:
 # FLEXIBLE SLOPE CORRECTOR (HANDLES VARIABLE FEATURES)
 # =============================================================================
 
+
 class FlexibleSlopeCorrector(nn.Module):
     """
     Corrector that adapts to different feature combinations
@@ -718,13 +738,13 @@ class FlexibleSlopeCorrector(nn.Module):
         self.input_dim = input_dim
 
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 16),
+            nn.Linear(input_dim, 32),
             nn.ReLU(),
             nn.Dropout(0.4),
-            nn.Linear(16, 8),
+            nn.Linear(32, 16),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(8, 1)
+            nn.Linear(16, 1)
         )
 
     def forward(self, x):
@@ -732,7 +752,6 @@ class FlexibleSlopeCorrector(nn.Module):
         correction = self.mlp(x)
         final_slope = slope_cnn + correction
         return final_slope
-
 
 # =============================================================================
 # FEATURE BUILDER (CONSTRUCTS FEATURE VECTORS FOR EACH VARIANT)
