@@ -117,7 +117,7 @@ class ProgressionPredictor:
     
     
     def __init__(self, cnn_model, corrector_model, scaler, 
-                 patient_data, features_data, slope_scaler=None,
+                 patient_data, features_data, slope_scaler=None, feature_cols=None,
                  device='cuda'):
         """
         Args:
@@ -135,6 +135,7 @@ class ProgressionPredictor:
         self.patient_data = patient_data
         self.features_data = features_data
         self.slope_scaler = slope_scaler
+        self.feature_cols = feature_cols
         self.device = device
     
     def predict_patient(self, patient_id, dataset, use_corrector=True):
@@ -185,6 +186,7 @@ class ProgressionPredictor:
                 features_dict, 
                 self.corrector, 
                 self.scaler,
+                self.feature_cols,
                 self.device
             )
             
@@ -205,7 +207,7 @@ class ProgressionPredictor:
         pdata = self.patient_data[patient_id]
         baseline_fvc = pdata['fvc_values'][0]  # First measurement
         baseline_week = pdata['weeks'][0]
-        PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 60, 72, 84, 96]  # weeks
+        PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 52,66, 72, 84, 96,104]  # weeks
         # Predict at standard timepoints
         future_weeks = np.array(PROGRESSION_TIMEPOINTS)
         weeks_from_baseline = future_weeks - baseline_week
@@ -448,7 +450,18 @@ if __name__ == "__main__":
     
     # Load scaler
     with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\scaler_full.pkl', 'rb') as f:
-        scaler, _ = pickle.load(f)
+        scaler, feature_cols = pickle.load(f)
+
+    print(f"✓ Loaded corrector with {len(feature_cols)} features:")
+    print(f"  Features: {feature_cols}")
+
+    # Verify scaler looks reasonable
+    print(f"\n{'='*70}")
+    print("LOADED SCALER PARAMETERS:")
+    print(f"{'='*70}")
+    for i, col in enumerate(feature_cols):
+        print(f"{col:25s}: mean={scaler.mean_[i]:12.2f}, std={scaler.scale_[i]:12.2f}")
+    print(f"{'='*70}\n")
 
     # Paths
     CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
@@ -633,6 +646,7 @@ if __name__ == "__main__":
         scaler=scaler,
         patient_data=patient_data,
         features_data=features_data,
+        feature_cols=feature_cols,
         slope_scaler=train_ds.slope_scaler,
         device='cuda'
     )
@@ -665,4 +679,5 @@ if __name__ == "__main__":
     print("  5. Classification → Progression vs Stable")
     print("\nProgression Criteria:")
     print(f"  - ≥{PROGRESSION_THRESHOLD_PERCENT}% relative FVC decline")
+    PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 52,66, 72, 84, 96,104]
     print(f"  - Evaluated at: {PROGRESSION_TIMEPOINTS} weeks")
