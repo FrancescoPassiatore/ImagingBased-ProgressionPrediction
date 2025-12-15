@@ -727,31 +727,28 @@ class ImprovedSlopeTrainer:
 # FLEXIBLE SLOPE CORRECTOR (HANDLES VARIABLE FEATURES)
 # =============================================================================
 
-
-class FlexibleSlopeCorrector(nn.Module):
-    """
-    Corrector that adapts to different feature combinations
-    """
-    def __init__(self, input_dim, model_name="corrector"):
+class SlopeCorrector(nn.Module):
+    def __init__(self, input_dim):
         super().__init__()
-        self.model_name = model_name
-        self.input_dim = input_dim
 
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.Dropout(0.10),   # ↓ molto più basso
+
             nn.Linear(32, 16),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.05),   # ↓ molto più basso
+
             nn.Linear(16, 1)
         )
 
     def forward(self, x):
-        slope_cnn = x[:, 0:1]  # First feature is always CNN slope
-        correction = self.mlp(x)
-        final_slope = slope_cnn + correction
-        return final_slope
+        base = x[:, 0:1]      # slope_cnn_mean
+        corr = self.mlp(x)
+        return base + corr
+
+
 
 # =============================================================================
 # FEATURE BUILDER (CONSTRUCTS FEATURE VECTORS FOR EACH VARIANT)
