@@ -26,11 +26,7 @@ if __name__ == "__main__":
 
     # 1. Load models
     cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
-    cnn_model.load_state_dict(torch.load(r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
-
-
-
-
+    cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
 
 
 #-----------------------------------------------------------------------------------------------
@@ -70,6 +66,7 @@ if __name__ == "__main__":
         else:
             print(f"   {key}: {type(value).__name__} = {value}")
 
+
     print(f"\n📋 Sample feature data structure:")
     for key, value in features_data[sample_patient].items():
         print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
@@ -82,6 +79,7 @@ if __name__ == "__main__":
     val_ids   = pd.read_csv("Training/Progression_prediction_risk/data/val_patients_52w.csv")['Patient'].tolist()
     test_ids  = pd.read_csv("Training/Progression_prediction_risk/data/test_patients_52w.csv")['Patient'].tolist()
 
+    
     loader = DataLoader(
         SliceFeatureDataset(list(patient_data.keys()),patient_data),
         batch_size=16,
@@ -97,7 +95,9 @@ if __name__ == "__main__":
     cnn_model.eval()
     with torch.no_grad():
         for images, pids in loader:
+            print(images)
             images = images.to(device)
+            
             z = cnn_model.extract_features(images)
 
             for i, pid in enumerate(pids):
