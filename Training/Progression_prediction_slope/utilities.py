@@ -509,6 +509,59 @@ class SpatialAttentionModule(nn.Module):
 
         return attended_x, attention_map
 
+class FeatureExtractorCNN(nn.Module):
+    """
+    CNN with explicit spatial attention
+    Forces model to learn WHERE to look
+    """
+    def __init__(self, backbone_name='efficientnet_b0', pretrained=True):
+        super().__init__()
+
+        # Backbone
+        self.backbone = timm.create_model(
+            backbone_name,
+            pretrained=pretrained,
+            in_chans=3,
+            num_classes=0,
+            features_only=True  # Return intermediate features
+        )
+
+        # Get feature dimensions
+        # For EfficientNet-B0: [16, 24, 40, 112, 1280]
+        feat_dims = self.backbone.feature_info.channels()
+
+        # Add spatial attention to last feature map
+        self.spatial_attention = SpatialAttentionModule(feat_dims[-1])
+
+        # Global pooling
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        
+
+
+    def forward(self, x, return_attention=False):
+        """
+        Args:
+            x: (B, 3, H, W) input images
+            return_attention: if True, return attention maps for visualization
+        """
+        # Extract features
+        features = self.backbone(x)
+        last_feature_map = features[-1]  # (B, C, h, w)
+
+        # Apply spatial attention
+        attended_features, attention_map = self.spatial_attention(last_feature_map)
+
+        # Global pooling
+        pooled = self.global_pool(attended_features).flatten(1)  # (B, C)
+
+        # Prediction
+        output = self.head(pooled).squeeze(-1)  # (B,)
+
+        if return_attention:
+            return output, attention_map
+        return output
+
 class ImprovedSliceLevelCNN(nn.Module):
     """
     CNN with explicit spatial attention

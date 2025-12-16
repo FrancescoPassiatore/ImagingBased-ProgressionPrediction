@@ -207,7 +207,7 @@ class ProgressionPredictor:
         pdata = self.patient_data[patient_id]
         baseline_fvc = pdata['fvc_values'][0]  # First measurement
         baseline_week = pdata['weeks'][0]
-        PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 52,66, 72, 84, 96,104]  # weeks
+        PROGRESSION_TIMEPOINTS = pdata['weeks']  # weeks
         # Predict at standard timepoints
         future_weeks = np.array(PROGRESSION_TIMEPOINTS)
         weeks_from_baseline = future_weeks - baseline_week
@@ -666,8 +666,8 @@ if __name__ == "__main__":
     print(f"Recall: {metrics['recall']:.3f}")
     
     # 5. Visualize sample patients
-    sample_patient_ids = test_patients[:3]  # First 3 patients
-    plot_progression_predictions(predictor, test_ds, sample_patient_ids)
+    sample_patient_ids = test_patients[:5]  # First 3 patients
+    plot_progression_predictions(predictor, test_ds, sample_patient_ids,save_path=r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\output_progression')
     
     print("IPF Progression Prediction Pipeline")
     print("="*80)
@@ -679,5 +679,4 @@ if __name__ == "__main__":
     print("  5. Classification → Progression vs Stable")
     print("\nProgression Criteria:")
     print(f"  - ≥{PROGRESSION_THRESHOLD_PERCENT}% relative FVC decline")
-    PROGRESSION_TIMEPOINTS = [12, 24, 36, 48, 52,66, 72, 84, 96,104]
-    print(f"  - Evaluated at: {PROGRESSION_TIMEPOINTS} weeks")
+    print(f"  - Evaluated at: personalized weeks per patient")
