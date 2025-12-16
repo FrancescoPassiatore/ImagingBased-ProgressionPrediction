@@ -1,0 +1,7 @@
+{
+    "endpoint": "FVC decline >= 10%",
+    "horizon_weeks": 52,
+    "window_weeks": 8,
+    "n_patients": 165,
+    "positive_rate": 0.2727272727272727
+}

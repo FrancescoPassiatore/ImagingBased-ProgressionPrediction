@@ -19,8 +19,7 @@ import pandas as pd
 from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 #Get utilites from utilities.py
-from utilities import *
-
+from Training.Progression_prediction_slope.utilities import *
 from torch.utils.data import Dataset, DataLoader
 
 
