@@ -1,3 +1,5 @@
+from datetime import datetime
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -15,23 +17,497 @@ from torch.utils.data import Dataset, Sampler
 import timm
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import torch.optim as optim
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score
+import optuna
+from optuna.trial import TrialState
+from torch.utils.data import DataLoader
 
 
+class FusionMLPOptuna(nn.Module):
+    """Flexible MLP architecture for Optuna optimization"""
+    
+    def __init__(self, img_dim, hand_dim, trial):
+        super().__init__()
+        
+        # Sample architecture parameters
+        img_hidden = trial.suggest_categorical('img_hidden', [128, 256, 512])
+        hand_hidden = trial.suggest_categorical('hand_hidden', [32, 64, 128])
+        n_fusion_layers = trial.suggest_int('n_fusion_layers', 1, 3)
+        dropout = trial.suggest_float('dropout', 0.3, 0.7, step=0.1)
+        activation_name = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'elu'])
+        use_layer_norm = trial.suggest_categorical('use_layer_norm', [True, False])
+        
+        # Activation function
+        if activation_name == 'relu':
+            activation = nn.ReLU()
+        elif activation_name == 'leaky_relu':
+            activation = nn.LeakyReLU(0.2)
+        else:
+            activation = nn.ELU()
+        
+        norm_layer = nn.LayerNorm if use_layer_norm else nn.BatchNorm1d
+        
+        # Image embedding branch
+        self.img_fc = nn.Sequential(
+            nn.Linear(img_dim, img_hidden),
+            norm_layer(img_hidden),
+            activation,
+            nn.Dropout(dropout)
+        )
+        
+        # Handcrafted features branch
+        self.hand_fc = nn.Sequential(
+            nn.Linear(hand_dim, hand_hidden),
+            norm_layer(hand_hidden),
+            activation,
+            nn.Dropout(dropout)
+        )
+        
+        # Fusion layers
+        fusion_input = img_hidden + hand_hidden
+        fusion_layers = []
+        prev_dim = fusion_input
+        
+        for i in range(n_fusion_layers):
+            hidden_dim = trial.suggest_categorical(f'fusion_layer_{i}', [64, 128, 256, 512])
+            fusion_layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                norm_layer(hidden_dim),
+                activation,
+                nn.Dropout(dropout)
+            ])
+            prev_dim = hidden_dim
+        
+        fusion_layers.append(nn.Linear(prev_dim, 1))
+        self.fusion = nn.Sequential(*fusion_layers)
+        
+        # Weight initialization
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x_img, x_hand):
+        img_feat = self.img_fc(x_img)
+        hand_feat = self.hand_fc(x_hand)
+        fused = torch.cat([img_feat, hand_feat], dim=1)
+        return self.fusion(fused)
 
+
+def objective(trial, train_loader, val_loader, device, img_dim, hand_dim, max_epochs=50):
+    """Optuna objective function"""
+    
+    # Sample hyperparameters
+    lr = trial.suggest_float('lr', 1e-5, 1e-3, log=True)
+    weight_decay = trial.suggest_float('weight_decay', 1e-5, 1e-3, log=True)
+    optimizer_name = trial.suggest_categorical('optimizer', ['adam', 'adamw'])
+    scheduler_name = trial.suggest_categorical('scheduler', ['plateau', 'cosine', 'none'])
+    use_class_weights = trial.suggest_categorical('use_class_weights', [True, False])
+    grad_clip = trial.suggest_float('grad_clip', 0.5, 2.0, step=0.5)
+    batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+    
+    # Recreate dataloaders with new batch size if needed
+    if batch_size != train_loader.batch_size:
+        train_loader = DataLoader(
+            train_loader.dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=0
+        )
+        val_loader = DataLoader(
+            val_loader.dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            num_workers=0
+        )
+    
+    # Create model
+    model = FusionMLPOptuna(img_dim, hand_dim, trial).to(device)
+    
+    # Setup loss function
+    if use_class_weights:
+        labels = [train_loader.dataset[i]['y'].item() for i in range(len(train_loader.dataset))]
+        pos_count = sum(labels)
+        neg_count = len(labels) - pos_count
+        pos_weight = torch.tensor([neg_count / max(pos_count, 1)]).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+    
+    # Setup optimizer
+    if optimizer_name == 'adam':
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    else:
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # Setup scheduler
+    if scheduler_name == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=5
+        )
+    elif scheduler_name == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
+    else:
+        scheduler = None
+    
+    # Compute normalization statistics
+    all_x_img, all_x_hand = [], []
+    for batch in train_loader:
+        all_x_img.append(batch['x_img'])
+        all_x_hand.append(batch['x_hand'])
+    all_x_img = torch.cat(all_x_img, dim=0)
+    all_x_hand = torch.cat(all_x_hand, dim=0)
+    
+    norm_stats = {
+        'img_mean': all_x_img.mean(dim=0).to(device),
+        'img_std': (all_x_img.std(dim=0) + 1e-8).to(device),
+        'hand_mean': all_x_hand.mean(dim=0).to(device),
+        'hand_std': (all_x_hand.std(dim=0) + 1e-8).to(device)
+    }
+    
+    best_val_auc = 0
+    patience_counter = 0
+    early_stop_patience = 15
+    
+    # Training loop
+    for epoch in range(max_epochs):
+        # Training phase
+        model.train()
+        train_loss = 0
+        train_preds, train_labels = [], []
+        
+        for batch in train_loader:
+            x_img = batch['x_img'].to(device)
+            x_hand = batch['x_hand'].to(device)
+            y = batch['y'].to(device)
+            
+            # Normalize
+            x_img = (x_img - norm_stats['img_mean']) / norm_stats['img_std']
+            x_hand = (x_hand - norm_stats['hand_mean']) / norm_stats['hand_std']
+            
+            # Forward pass
+            optimizer.zero_grad()
+            logits = model(x_img, x_hand)
+            loss = criterion(logits, y)
+            
+            # Backward pass
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_preds.extend(torch.sigmoid(logits).detach().cpu().numpy().flatten())
+            train_labels.extend(y.cpu().numpy().flatten())
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        val_preds, val_labels = [], []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                x_img = batch['x_img'].to(device)
+                x_hand = batch['x_hand'].to(device)
+                y = batch['y'].to(device)
+                
+                # Normalize
+                x_img = (x_img - norm_stats['img_mean']) / norm_stats['img_std']
+                x_hand = (x_hand - norm_stats['hand_mean']) / norm_stats['hand_std']
+                
+                logits = model(x_img, x_hand)
+                loss = criterion(logits, y)
+                
+                val_loss += loss.item()
+                val_preds.extend(torch.sigmoid(logits).cpu().numpy().flatten())
+                val_labels.extend(y.cpu().numpy().flatten())
+        
+        # Compute metrics
+        train_auc = roc_auc_score(train_labels, train_preds)
+        val_auc = roc_auc_score(val_labels, val_preds)
+        
+        # Update scheduler
+        if scheduler is not None:
+            if scheduler_name == 'plateau':
+                scheduler.step(val_auc)
+            else:
+                scheduler.step()
+        
+        # Track best model
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        # Report intermediate results to Optuna
+        trial.report(val_auc, epoch)
+        
+        # Early stopping
+        if patience_counter >= early_stop_patience:
+            break
+        
+        # Handle pruning based on intermediate value
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    
+    return best_val_auc
+
+
+def run_optuna_study(train_loader, val_loader, device, n_trials=50, study_name="fusion_mlp_optimization"):
+    """Run Optuna hyperparameter optimization"""
+    
+    # Get feature dimensions
+    sample = train_loader.dataset[0]
+    img_dim = sample['x_img'].shape[0]
+    hand_dim = sample['x_hand'].shape[0]
+    
+    print("\n" + "="*80)
+    print(f"OPTUNA HYPERPARAMETER OPTIMIZATION")
+    print("="*80)
+    print(f"Feature dimensions: img={img_dim}, hand={hand_dim}")
+    print(f"Training samples: {len(train_loader.dataset)}")
+    print(f"Validation samples: {len(val_loader.dataset)}")
+    print(f"Number of trials: {n_trials}")
+    print("="*80 + "\n")
+    
+    # Create study
+    study = optuna.create_study(
+        study_name=study_name,
+        direction='maximize',  # Maximize validation AUC
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    
+    # Optimize
+    study.optimize(
+        lambda trial: objective(trial, train_loader, val_loader, device, img_dim, hand_dim),
+        n_trials=n_trials,
+        show_progress_bar=True,
+        callbacks=[lambda study, trial: print(f"\nTrial {trial.number}: Val AUC = {trial.value:.4f}")]
+    )
+    
+    # Print results
+    print("\n" + "="*80)
+    print("OPTIMIZATION COMPLETE")
+    print("="*80 + "\n")
+    
+    print(f"Number of finished trials: {len(study.trials)}")
+    print(f"Number of pruned trials: {len([t for t in study.trials if t.state == TrialState.PRUNED])}")
+    print(f"Number of complete trials: {len([t for t in study.trials if t.state == TrialState.COMPLETE])}")
+    
+    print("\n" + "-"*80)
+    print("BEST TRIAL")
+    print("-"*80)
+    best_trial = study.best_trial
+    print(f"\nValidation AUC: {best_trial.value:.4f}")
+    print(f"\nBest hyperparameters:")
+    for key, value in best_trial.params.items():
+        print(f"  {key}: {value}")
+    
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save study
+    df = study.trials_dataframe()
+    df.to_csv(f'optuna_results_{timestamp}.csv', index=False)
+    print(f"\n✓ Results saved to: optuna_results_{timestamp}.csv")
+    
+    # Save best params
+    with open(f'best_params_{timestamp}.json', 'w') as f:
+        json.dump(best_trial.params, f, indent=2)
+    print(f"✓ Best parameters saved to: best_params_{timestamp}.json")
+    
+    # Visualization (requires optuna and plotly)
+    try:
+        
+        import plotly
+        # Optimization history
+        fig = optuna.visualization.plot_optimization_history(study)
+        fig.write_html(f'optuna_history_{timestamp}.html')
+        
+        # Parameter importance
+        fig = optuna.visualization.plot_param_importances(study)
+        fig.write_html(f'optuna_importance_{timestamp}.html')
+        
+        # Parallel coordinate plot
+        fig = optuna.visualization.plot_parallel_coordinate(study)
+        fig.write_html(f'optuna_parallel_{timestamp}.html')
+        
+        print(f"✓ Visualizations saved as HTML files")
+    except ImportError:
+        print("⚠️  Install plotly for visualizations: pip install plotly")
+    
+    return study, best_trial
+
+
+def train_with_best_params(best_params, train_loader, val_loader, test_loader, device, max_epochs=100):
+    """Train final model with best hyperparameters"""
+    
+    print("\n" + "="*80)
+    print("TRAINING FINAL MODEL WITH BEST PARAMETERS")
+    print("="*80 + "\n")
+    
+    # Get dimensions
+    sample = train_loader.dataset[0]
+    img_dim = sample['x_img'].shape[0]
+    hand_dim = sample['x_hand'].shape[0]
+    
+    # Create trial-like object for model creation
+    class FakeTrial:
+        def __init__(self, params):
+            self.params = params
+        def suggest_categorical(self, name, choices):
+            return self.params[name]
+        def suggest_int(self, name, low, high):
+            return self.params[name]
+        def suggest_float(self, name, low, high, **kwargs):
+            return self.params[name]
+    
+    fake_trial = FakeTrial(best_params)
+    
+    # Recreate dataloaders with best batch size
+    batch_size = best_params.get('batch_size', 32)
+    train_loader = DataLoader(train_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_loader.dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_loader.dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    # Create model
+    model = FusionMLPOptuna(img_dim, hand_dim, fake_trial).to(device)
+    
+    # Setup training components
+    if best_params['use_class_weights']:
+        labels = [train_loader.dataset[i]['y'].item() for i in range(len(train_loader.dataset))]
+        pos_weight = torch.tensor([labels.count(0) / max(labels.count(1), 1)]).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+    
+    if best_params['optimizer'] == 'adam':
+        optimizer = optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
+    else:
+        optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
+    
+    if best_params['scheduler'] == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+    elif best_params['scheduler'] == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
+    else:
+        scheduler = None
+    
+    # Normalization
+    all_x_img = torch.cat([batch['x_img'] for batch in train_loader], dim=0)
+    all_x_hand = torch.cat([batch['x_hand'] for batch in train_loader], dim=0)
+    norm_stats = {
+        'img_mean': all_x_img.mean(dim=0).to(device),
+        'img_std': (all_x_img.std(dim=0) + 1e-8).to(device),
+        'hand_mean': all_x_hand.mean(dim=0).to(device),
+        'hand_std': (all_x_hand.std(dim=0) + 1e-8).to(device)
+    }
+    
+    # Training loop
+    best_val_auc = 0
+    history = {'train_loss': [], 'train_auc': [], 'val_loss': [], 'val_auc': []}
+    
+    for epoch in range(max_epochs):
+        # Train
+        model.train()
+        train_loss, train_preds, train_labels = 0, [], []
+        
+        for batch in train_loader:
+            x_img = (batch['x_img'].to(device) - norm_stats['img_mean']) / norm_stats['img_std']
+            x_hand = (batch['x_hand'].to(device) - norm_stats['hand_mean']) / norm_stats['hand_std']
+            y = batch['y'].to(device)
+            
+            optimizer.zero_grad()
+            logits = model(x_img, x_hand)
+            loss = criterion(logits, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), best_params['grad_clip'])
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_preds.extend(torch.sigmoid(logits).detach().cpu().numpy().flatten())
+            train_labels.extend(y.cpu().numpy().flatten())
+        
+        # Validate
+        model.eval()
+        val_loss, val_preds, val_labels = 0, [], []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                x_img = (batch['x_img'].to(device) - norm_stats['img_mean']) / norm_stats['img_std']
+                x_hand = (batch['x_hand'].to(device) - norm_stats['hand_mean']) / norm_stats['hand_std']
+                y = batch['y'].to(device)
+                
+                logits = model(x_img, x_hand)
+                val_loss += criterion(logits, y).item()
+                val_preds.extend(torch.sigmoid(logits).cpu().numpy().flatten())
+                val_labels.extend(y.cpu().numpy().flatten())
+        
+        # Metrics
+        train_auc = roc_auc_score(train_labels, train_preds)
+        val_auc = roc_auc_score(val_labels, val_preds)
+        
+        history['train_loss'].append(train_loss / len(train_loader))
+        history['train_auc'].append(train_auc)
+        history['val_loss'].append(val_loss / len(val_loader))
+        history['val_auc'].append(val_auc)
+        
+        if scheduler:
+            scheduler.step(val_auc) if best_params['scheduler'] == 'plateau' else scheduler.step()
+        
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            torch.save({'model': model.state_dict(), 'norm_stats': norm_stats, 'params': best_params}, 
+                      'final_best_model.pth')
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{max_epochs} - Train AUC: {train_auc:.4f}, Val AUC: {val_auc:.4f}")
+    
+    # Test evaluation
+    checkpoint = torch.load('final_best_model.pth')
+    model.load_state_dict(checkpoint['model'])
+    model.eval()
+    
+    test_preds, test_labels = [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            x_img = (batch['x_img'].to(device) - norm_stats['img_mean']) / norm_stats['img_std']
+            x_hand = (batch['x_hand'].to(device) - norm_stats['hand_mean']) / norm_stats['hand_std']
+            
+            logits = model(x_img, x_hand)
+            test_preds.extend(torch.sigmoid(logits).cpu().numpy().flatten())
+            test_labels.extend(batch['y'].numpy().flatten())
+    
+    test_auc = roc_auc_score(test_labels, test_preds)
+    test_acc = accuracy_score(test_labels, (np.array(test_preds) >= 0.5).astype(int))
+    test_f1 = f1_score(test_labels, (np.array(test_preds) >= 0.5).astype(int))
+    
+    print(f"\n{'='*80}")
+    print("FINAL TEST RESULTS")
+    print(f"{'='*80}")
+    print(f"Test AUC: {test_auc:.4f}")
+    print(f"Test Accuracy: {test_acc:.4f}")
+    print(f"Test F1: {test_f1:.4f}")
+    
+    return model, history
 
 #======================================================================================
 #PROGRESSION PREDICTION RISK LOADERS
 #======================================================================================
-
 class IPFDataLoaderPredictorProgression:
-    """Carica e prepara i dati dal CSV"""
+    """Loads and prepares data from CSV"""
 
-    def __init__(self, csv_path: str, csv_features_path : str,npy_dir:str):
+    def __init__(self, csv_path: str, csv_features_path: str, npy_dir: str):
         """
         Args:
-            csv_path: Path al CSV con [Patient, Weeks, FVC, Slice_files, FVC slope, FVC intercept0]
-            npy_dir: Directory path di file npy images
-
+            csv_path: Path to CSV with [Patient, Weeks, FVC, Slice_files, FVC slope, FVC intercept0]
+            csv_features_path: Path to CSV with handcrafted features
+            npy_dir: Directory path for npy image files
         """
         self.df = pd.read_csv(csv_path)
         self.npy_dir = npy_dir
@@ -50,11 +526,11 @@ class IPFDataLoaderPredictorProgression:
         else:
             print(f"✅ All demographic columns present: {required_demo_cols}")
 
-        # Verifica che i pazienti nel CSV abbiano cartelle NPY
+        # Verify NPY availability
         self._verify_npy_availability()
 
     def _verify_npy_availability(self):
-        """Verifica che ogni paziente nel CSV abbia una cartella con file .npy"""
+        """Verify that each patient in the CSV has a folder with .npy files"""
         patients_csv = set(self.df['Patient'].unique())
         patients_npy = set([d for d in os.listdir(self.npy_dir)
                            if os.path.isdir(os.path.join(self.npy_dir, d))])
@@ -63,23 +539,77 @@ class IPFDataLoaderPredictorProgression:
         extra = patients_npy - patients_csv
 
         if missing:
-            print(f"⚠️  {len(missing)} pazienti nel CSV senza cartella NPY: {list(missing)[:5]}...")
+            print(f"⚠️  {len(missing)} patients in CSV without NPY folder: {list(missing)[:5]}...")
         if extra:
-            print(f"ℹ️  {len(extra)} cartelle NPY non nel CSV (verranno ignorate)")
+            print(f"ℹ️  {len(extra)} NPY folders not in CSV (will be ignored)")
 
         available = patients_csv & patients_npy
-        print(f"✅ {len(available)} pazienti con dati completi (CSV + NPY)")
-
+        print(f"✅ {len(available)} patients with complete data (CSV + NPY)")
 
     def get_patient_data(self):
+        """Extract patient data and features with NaN handling"""
         patient_data = {}
         features_dict = {}
+        
+        # First pass: collect all features to compute means
+        all_features = {
+            'approx_vol': [], 'avg_num_tissue_pixel': [], 'avg_tissue': [],
+            'avg_tissue_thickness': [], 'avg_tissue_by_total': [], 
+            'avg_tissue_by_lung': [], 'mean': [], 'skew': [], 
+            'kurtosis': [], 'age': []
+        }
 
         for patient_id in self.df['Patient'].unique():
-
             patient_df = self.df[self.df['Patient'] == patient_id]
             patient_df_features = self.df_features[self.df_features['Patient'] == patient_id]
 
+            # Check if patient has NPY files
+            patient_npy_folder = os.path.join(self.npy_dir, patient_id)
+            if not os.path.exists(patient_npy_folder):
+                continue
+
+            npy_files = sorted(glob.glob(os.path.join(patient_npy_folder, "*.npy")))
+            if not npy_files:
+                continue
+            
+            # Collect non-NaN values for computing means
+            for key in all_features.keys():
+                if key == 'age':
+                    val = patient_df['Age'].iloc[0]
+                else:
+                    col_map = {
+                        'approx_vol': 'ApproxVol_30_60',
+                        'avg_num_tissue_pixel': 'Avg_NumTissuePixel_30_60',
+                        'avg_tissue': 'Avg_Tissue_30_60',
+                        'avg_tissue_thickness': 'Avg_Tissue_thickness_30_60',
+                        'avg_tissue_by_total': 'Avg_TissueByTotal_30_60',
+                        'avg_tissue_by_lung': 'Avg_TissueByLung_30_60',
+                        'mean': 'Mean_30_60',
+                        'skew': 'Skew_30_60',
+                        'kurtosis': 'Kurtosis_30_60'
+                    }
+                    val = patient_df_features[col_map[key]].iloc[0]
+                
+                if pd.notna(val) and not np.isinf(val):
+                    all_features[key].append(float(val))
+        
+        # Compute means for imputation
+        feature_means = {k: np.mean(v) if len(v) > 0 else 0.0 
+                        for k, v in all_features.items()}
+        
+        print("\n📊 Feature means for NaN imputation:")
+        for k, v in feature_means.items():
+            print(f"   {k}: {v:.4f}")
+        
+        nan_count = 0
+        inf_count = 0
+
+        # Second pass: create feature dictionaries with NaN replacement
+        for patient_id in self.df['Patient'].unique():
+            patient_df = self.df[self.df['Patient'] == patient_id]
+            patient_df_features = self.df_features[self.df_features['Patient'] == patient_id]
+
+            # Check if patient has NPY files
             patient_npy_folder = os.path.join(self.npy_dir, patient_id)
             if not os.path.exists(patient_npy_folder):
                 continue
@@ -88,18 +618,39 @@ class IPFDataLoaderPredictorProgression:
             if not npy_files:
                 continue
 
-            # --- HANDCRAFTED + TABULAR (unchanged) ---
+            # Helper function to get feature value with NaN handling
+            def get_safe_value(value, feature_name):
+                nonlocal nan_count, inf_count
+                if pd.isna(value):
+                    nan_count += 1
+                    return feature_means[feature_name]
+                if np.isinf(value):
+                    inf_count += 1
+                    return feature_means[feature_name]
+                return float(value)
+
+            # Extract handcrafted + tabular features with NaN handling
             features_dict[patient_id] = {
-                'approx_vol': float(patient_df_features['ApproxVol_30_60'].iloc[0]),
-                'avg_num_tissue_pixel': float(patient_df_features['Avg_NumTissuePixel_30_60'].iloc[0]),
-                'avg_tissue': float(patient_df_features['Avg_Tissue_30_60'].iloc[0]),
-                'avg_tissue_thickness': float(patient_df_features['Avg_Tissue_thickness_30_60'].iloc[0]),
-                'avg_tissue_by_total': float(patient_df_features['Avg_TissueByTotal_30_60'].iloc[0]),
-                'avg_tissue_by_lung': float(patient_df_features['Avg_TissueByLung_30_60'].iloc[0]),
-                'mean': float(patient_df_features['Mean_30_60'].iloc[0]),
-                'skew': float(patient_df_features['Skew_30_60'].iloc[0]),
-                'kurtosis': float(patient_df_features['Kurtosis_30_60'].iloc[0]),
-                'age': float(patient_df['Age'].iloc[0]),
+                'approx_vol': get_safe_value(
+                    patient_df_features['ApproxVol_30_60'].iloc[0], 'approx_vol'),
+                'avg_num_tissue_pixel': get_safe_value(
+                    patient_df_features['Avg_NumTissuePixel_30_60'].iloc[0], 'avg_num_tissue_pixel'),
+                'avg_tissue': get_safe_value(
+                    patient_df_features['Avg_Tissue_30_60'].iloc[0], 'avg_tissue'),
+                'avg_tissue_thickness': get_safe_value(
+                    patient_df_features['Avg_Tissue_thickness_30_60'].iloc[0], 'avg_tissue_thickness'),
+                'avg_tissue_by_total': get_safe_value(
+                    patient_df_features['Avg_TissueByTotal_30_60'].iloc[0], 'avg_tissue_by_total'),
+                'avg_tissue_by_lung': get_safe_value(
+                    patient_df_features['Avg_TissueByLung_30_60'].iloc[0], 'avg_tissue_by_lung'),
+                'mean': get_safe_value(
+                    patient_df_features['Mean_30_60'].iloc[0], 'mean'),
+                'skew': get_safe_value(
+                    patient_df_features['Skew_30_60'].iloc[0], 'skew'),
+                'kurtosis': get_safe_value(
+                    patient_df_features['Kurtosis_30_60'].iloc[0], 'kurtosis'),
+                'age': get_safe_value(
+                    patient_df['Age'].iloc[0], 'age'),
                 'sex': 1.0 if patient_df['Sex'].iloc[0] == 'Male' else 0.0,
                 'smoking_status': {
                     'Never smoked': 0.0,
@@ -112,16 +663,33 @@ class IPFDataLoaderPredictorProgression:
                 'slices': npy_files,
                 'n_slices': len(npy_files)
             }
+        
+        if nan_count > 0:
+            print(f"\n⚠️  Replaced {nan_count} NaN values with feature means")
+        if inf_count > 0:
+            print(f"⚠️  Replaced {inf_count} Inf values with feature means")
+        if nan_count == 0 and inf_count == 0:
+            print(f"\n✅ No NaN or Inf values detected in features")
 
         return patient_data, features_dict
 
     def __len__(self):
         return len(self.df)
-    
+
+
 class SliceFeatureDataset(Dataset):
+    """Dataset for extracting features from individual CT slices"""
+    
     def __init__(self, patient_list, patient_data):
+        """
+        Args:
+            patient_list: List of patient IDs
+            patient_data: Dictionary with patient slice paths
+        """
         self.items = []
         for pid in patient_list:
+            if pid not in patient_data:
+                continue
             for slice_path in patient_data[pid]['slices']:
                 self.items.append((pid, slice_path))
 
@@ -131,9 +699,16 @@ class SliceFeatureDataset(Dataset):
     def __getitem__(self, idx):
         pid, slice_path = self.items[idx]
 
+        # Load image
         img = np.load(slice_path)
+        
+        # Convert to 3 channels if grayscale
         if img.ndim == 2:
             img = np.stack([img, img, img], axis=0)
+        
+        # Ensure correct shape (C, H, W)
+        if img.shape[-1] == 3:  # If (H, W, C)
+            img = np.transpose(img, (2, 0, 1))  # Convert to (C, H, W)
 
         img = torch.FloatTensor(img)
 
@@ -142,7 +717,10 @@ class SliceFeatureDataset(Dataset):
             'patient_id': pid
         }
 
+
 class PatientMLPDataset(Dataset):
+    """Dataset combining CNN embeddings with handcrafted features for patient-level prediction"""
+    
     def __init__(
         self,
         label_csv,
@@ -150,11 +728,29 @@ class PatientMLPDataset(Dataset):
         handcrafted_dict,
         patient_list
     ):
+        """
+        Args:
+            label_csv: Path to CSV with patient labels
+            embeddings_dict: Dictionary of patient embeddings from CNN
+            handcrafted_dict: Dictionary of handcrafted features
+            patient_list: List of patient IDs to include
+        """
         self.df = pd.read_csv(label_csv)
-        self.df = self.df[self.df['Patient'].isin(patient_list)]
+        self.df = self.df[self.df['Patient'].isin(patient_list)].reset_index(drop=True)
 
         self.embeddings = embeddings_dict
         self.handcrafted = handcrafted_dict
+        
+        # Filter out patients without embeddings or features
+        valid_patients = []
+        for pid in self.df['Patient']:
+            if pid in self.embeddings and pid in self.handcrafted:
+                valid_patients.append(pid)
+        
+        self.df = self.df[self.df['Patient'].isin(valid_patients)].reset_index(drop=True)
+        
+        if len(self.df) < len(patient_list):
+            print(f"⚠️  Warning: Only {len(self.df)}/{len(patient_list)} patients have complete data")
 
     def __len__(self):
         return len(self.df)
@@ -163,10 +759,13 @@ class PatientMLPDataset(Dataset):
         row = self.df.iloc[idx]
         pid = row['Patient']
 
-        x_img = torch.FloatTensor(self.embeddings[pid])       # (1280,)
-        x_hand = torch.FloatTensor(
-            list(self.handcrafted[pid].values())
-        )
+        # Get CNN embedding
+        x_img = torch.FloatTensor(self.embeddings[pid])
+        
+        # Get handcrafted features (preserve order)
+        x_hand = torch.FloatTensor(list(self.handcrafted[pid].values()))
+        
+        # Get label
         y = torch.FloatTensor([row['event_52']])
 
         return {
@@ -175,6 +774,609 @@ class PatientMLPDataset(Dataset):
             'y': y,
             'patient_id': pid
         }
+
+
+class FusionMLP(nn.Module):
+    """MLP that fuses CNN embeddings with handcrafted features"""
+    
+    def __init__(self, img_dim=1280, hand_dim=12, hidden_dims=[256, 128, 64], dropout=0.3):
+        """
+        Args:
+            img_dim: Dimension of CNN embedding
+            hand_dim: Dimension of handcrafted features
+            hidden_dims: List of hidden layer dimensions
+            dropout: Dropout rate
+        """
+        super().__init__()
+        
+        self.img_dim = img_dim
+        self.hand_dim = hand_dim
+        
+        # Process image embeddings
+        self.img_fc = nn.Sequential(
+            nn.Linear(img_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Process handcrafted features
+        self.hand_fc = nn.Sequential(
+            nn.Linear(hand_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Fusion layers
+        fusion_input_dim = 256 + 64
+        layers = []
+        prev_dim = fusion_input_dim
+        
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            prev_dim = hidden_dim
+        
+        # Output layer
+        layers.append(nn.Linear(prev_dim, 1))
+        
+        self.fusion = nn.Sequential(*layers)
+    
+    def forward(self, x_img, x_hand):
+        # Process each modality
+        img_feat = self.img_fc(x_img)
+        hand_feat = self.hand_fc(x_hand)
+        
+        # Concatenate
+        fused = torch.cat([img_feat, hand_feat], dim=1)
+        
+        # Final prediction
+        out = self.fusion(fused)
+        return out
+
+
+def train_epoch(model, loader, criterion, optimizer, device):
+    """Train for one epoch"""
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    
+    pbar = tqdm(loader, desc="Training")
+    for batch in pbar:
+        x_img = batch['x_img'].to(device)
+        x_hand = batch['x_hand'].to(device)
+        y = batch['y'].to(device)
+        
+        optimizer.zero_grad()
+        
+        # Forward pass
+        logits = model(x_img, x_hand)
+        loss = criterion(logits, y)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Track metrics
+        total_loss += loss.item()
+        preds = torch.sigmoid(logits).detach().cpu().numpy()
+        labels = y.detach().cpu().numpy()
+        
+        all_preds.extend(preds.flatten())
+        all_labels.extend(labels.flatten())
+        
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+    
+    avg_loss = total_loss / len(loader)
+    auc = roc_auc_score(all_labels, all_preds)
+    
+    return avg_loss, auc
+
+
+def validate(model, loader, criterion, device):
+    """Validate the model"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    all_pids = []
+    
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Validation"):
+            x_img = batch['x_img'].to(device)
+            x_hand = batch['x_hand'].to(device)
+            y = batch['y'].to(device)
+            
+            # Forward pass
+            logits = model(x_img, x_hand)
+            loss = criterion(logits, y)
+            
+            # Track metrics
+            total_loss += loss.item()
+            preds = torch.sigmoid(logits).cpu().numpy()
+            labels = y.cpu().numpy()
+            
+            all_preds.extend(preds.flatten())
+            all_labels.extend(labels.flatten())
+            all_pids.extend(batch['patient_id'])
+    
+    avg_loss = total_loss / len(loader)
+    auc = roc_auc_score(all_labels, all_preds)
+    
+    # Binary predictions at threshold 0.5
+    binary_preds = (np.array(all_preds) >= 0.5).astype(int)
+    acc = accuracy_score(all_labels, binary_preds)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, binary_preds, average='binary', zero_division=0
+    )
+    
+    metrics = {
+        'loss': avg_loss,
+        'auc': auc,
+        'accuracy': acc,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+    
+    return metrics, all_preds, all_labels, all_pids
+
+
+def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device='cuda'):
+    """Complete training loop"""
+    
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=5
+    )
+    
+    best_auc = 0
+    best_epoch = 0
+    history = {
+        'train_loss': [], 'train_auc': [],
+        'val_loss': [], 'val_auc': []
+    }
+    
+    print("\n" + "="*80)
+    print("TRAINING STARTED")
+    print("="*80)
+    
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        print("-" * 80)
+        
+        # Train
+        train_loss, train_auc = train_epoch(model, train_loader, criterion, optimizer, device)
+        
+        # Validate
+        val_metrics, _, _, _ = validate(model, val_loader, criterion, device)
+        
+        # Update scheduler
+        scheduler.step(val_metrics['auc'])
+        
+        # Save history
+        history['train_loss'].append(train_loss)
+        history['train_auc'].append(train_auc)
+        history['val_loss'].append(val_metrics['loss'])
+        history['val_auc'].append(val_metrics['auc'])
+        
+        # Print metrics
+        print(f"\nTrain Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f}")
+        print(f"Val Loss: {val_metrics['loss']:.4f} | Val AUC: {val_metrics['auc']:.4f}")
+        print(f"Val Acc: {val_metrics['accuracy']:.4f} | Val F1: {val_metrics['f1']:.4f}")
+        
+        # Save best model
+        if val_metrics['auc'] > best_auc:
+            best_auc = val_metrics['auc']
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), 'best_fusion_mlp.pth')
+            print(f"✅ New best model saved! (AUC: {best_auc:.4f})")
+    
+    print("\n" + "="*80)
+    print(f"TRAINING COMPLETED - Best AUC: {best_auc:.4f} at epoch {best_epoch}")
+    print("="*80)
+    
+    return history
+
+
+
+class FusionMLPV2(nn.Module):
+    """Improved MLP with configurable architecture and regularization"""
+    
+    def __init__(self, img_dim=1280, hand_dim=12, config=None):
+        super().__init__()
+        
+        # Default config
+        if config is None:
+            config = {
+                'img_hidden': 256,
+                'hand_hidden': 64,
+                'fusion_hidden': [256, 128, 64],
+                'dropout': 0.5,
+                'use_layer_norm': True,
+                'activation': 'relu'
+            }
+        
+        self.config = config
+        dropout = config['dropout']
+        
+        # Choose activation
+        if config['activation'] == 'relu':
+            act = nn.ReLU()
+        elif config['activation'] == 'leaky_relu':
+            act = nn.LeakyReLU(0.2)
+        elif config['activation'] == 'elu':
+            act = nn.ELU()
+        else:
+            act = nn.ReLU()
+        
+        # Image embedding processing
+        img_layers = [
+            nn.Linear(img_dim, config['img_hidden']),
+            nn.LayerNorm(config['img_hidden']) if config['use_layer_norm'] else nn.BatchNorm1d(config['img_hidden']),
+            act,
+            nn.Dropout(dropout)
+        ]
+        self.img_fc = nn.Sequential(*img_layers)
+        
+        # Handcrafted features processing
+        hand_layers = [
+            nn.Linear(hand_dim, config['hand_hidden']),
+            nn.LayerNorm(config['hand_hidden']) if config['use_layer_norm'] else nn.BatchNorm1d(config['hand_hidden']),
+            act,
+            nn.Dropout(dropout)
+        ]
+        self.hand_fc = nn.Sequential(*hand_layers)
+        
+        # Fusion layers
+        fusion_input = config['img_hidden'] + config['hand_hidden']
+        layers = []
+        prev_dim = fusion_input
+        
+        for hidden_dim in config['fusion_hidden']:
+            layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim) if config['use_layer_norm'] else nn.BatchNorm1d(hidden_dim),
+                act,
+                nn.Dropout(dropout)
+            ])
+            prev_dim = hidden_dim
+        
+        layers.append(nn.Linear(prev_dim, 1))
+        self.fusion = nn.Sequential(*layers)
+        
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x_img, x_hand):
+        img_feat = self.img_fc(x_img)
+        hand_feat = self.hand_fc(x_hand)
+        fused = torch.cat([img_feat, hand_feat], dim=1)
+        out = self.fusion(fused)
+        return out
+
+
+def train_with_config(config, train_loader, val_loader, device, max_epochs=50):
+    """Train model with specific hyperparameter configuration"""
+    
+    # Get dimensions
+    sample = train_loader.dataset[0]
+    img_dim = sample['x_img'].shape[0]
+    hand_dim = sample['x_hand'].shape[0]
+    
+    # Create model
+    model = FusionMLPV2(img_dim, hand_dim, config['model']).to(device)
+    
+    # Loss function with optional class weights
+    if config['use_class_weights']:
+        # Compute class weights
+        labels = [train_loader.dataset[i]['y'].item() for i in range(len(train_loader.dataset))]
+        pos_weight = torch.tensor([labels.count(0) / max(labels.count(1), 1)]).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+    
+    # Optimizer
+    if config['optimizer'] == 'adam':
+        optimizer = optim.Adam(
+            model.parameters(), 
+            lr=config['lr'], 
+            weight_decay=config['weight_decay']
+        )
+    elif config['optimizer'] == 'adamw':
+        optimizer = optim.AdamW(
+            model.parameters(), 
+            lr=config['lr'], 
+            weight_decay=config['weight_decay']
+        )
+    else:  # sgd
+        optimizer = optim.SGD(
+            model.parameters(), 
+            lr=config['lr'], 
+            momentum=0.9,
+            weight_decay=config['weight_decay']
+        )
+    
+    # Scheduler
+    if config['scheduler'] == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=5
+        )
+    elif config['scheduler'] == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max_epochs
+        )
+    else:
+        scheduler = None
+    
+    # Compute normalization stats
+    from collections import defaultdict
+    all_x_img, all_x_hand = [], []
+    for batch in train_loader:
+        all_x_img.append(batch['x_img'])
+        all_x_hand.append(batch['x_hand'])
+    all_x_img = torch.cat(all_x_img, dim=0)
+    all_x_hand = torch.cat(all_x_hand, dim=0)
+    
+    norm_stats = {
+        'img_mean': all_x_img.mean(dim=0).to(device),
+        'img_std': (all_x_img.std(dim=0) + 1e-8).to(device),
+        'hand_mean': all_x_hand.mean(dim=0).to(device),
+        'hand_std': (all_x_hand.std(dim=0) + 1e-8).to(device)
+    }
+    
+    best_val_auc = 0
+    patience_counter = 0
+    
+    for epoch in range(max_epochs):
+        # Training
+        model.train()
+        for batch in train_loader:
+            x_img = batch['x_img'].to(device)
+            x_hand = batch['x_hand'].to(device)
+            y = batch['y'].to(device)
+            
+            x_img = (x_img - norm_stats['img_mean']) / norm_stats['img_std']
+            x_hand = (x_hand - norm_stats['hand_mean']) / norm_stats['hand_std']
+            
+            optimizer.zero_grad()
+            logits = model(x_img, x_hand)
+            loss = criterion(logits, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config['grad_clip'])
+            optimizer.step()
+        
+        # Validation
+        model.eval()
+        val_preds, val_labels = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                x_img = batch['x_img'].to(device)
+                x_hand = batch['x_hand'].to(device)
+                y = batch['y'].to(device)
+                
+                x_img = (x_img - norm_stats['img_mean']) / norm_stats['img_std']
+                x_hand = (x_hand - norm_stats['hand_mean']) / norm_stats['hand_std']
+                
+                logits = model(x_img, x_hand)
+                preds = torch.sigmoid(logits).cpu().numpy()
+                val_preds.extend(preds.flatten())
+                val_labels.extend(y.cpu().numpy().flatten())
+        
+        from sklearn.metrics import roc_auc_score
+        val_auc = roc_auc_score(val_labels, val_preds)
+        
+        if scheduler is not None:
+            if config['scheduler'] == 'plateau':
+                scheduler.step(val_auc)
+            else:
+                scheduler.step()
+        
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= config['early_stop_patience']:
+                break
+    
+    return best_val_auc
+
+
+def grid_search(train_loader, val_loader, device):
+    """Perform grid search over hyperparameters"""
+    
+    # Define search space
+    search_space = {
+        'lr': [1e-5, 5e-5, 1e-4, 5e-4],
+        'dropout': [0.3, 0.5, 0.7],
+        'weight_decay': [1e-5, 1e-4, 1e-3],
+        'optimizer': ['adam', 'adamw'],
+        'scheduler': ['plateau', 'cosine', None],
+        'use_class_weights': [True, False],
+        'img_hidden': [128, 256, 512],
+        'fusion_hidden': [
+            [128, 64],
+            [256, 128, 64],
+            [512, 256, 128]
+        ],
+        'activation': ['relu', 'leaky_relu'],
+        'use_layer_norm': [True, False]
+    }
+    
+    results = []
+    
+    # For quick testing, try random search with N configs
+    import random
+    n_trials = 20
+    
+    print(f"\n{'='*80}")
+    print(f"HYPERPARAMETER SEARCH - Testing {n_trials} configurations")
+    print(f"{'='*80}\n")
+    
+    for trial in range(n_trials):
+        config = {
+            'lr': random.choice(search_space['lr']),
+            'dropout': random.choice(search_space['dropout']),
+            'weight_decay': random.choice(search_space['weight_decay']),
+            'optimizer': random.choice(search_space['optimizer']),
+            'scheduler': random.choice(search_space['scheduler']),
+            'use_class_weights': random.choice(search_space['use_class_weights']),
+            'grad_clip': 1.0,
+            'early_stop_patience': 10,
+            'model': {
+                'img_hidden': random.choice(search_space['img_hidden']),
+                'hand_hidden': 64,
+                'fusion_hidden': random.choice(search_space['fusion_hidden']),
+                'dropout': random.choice(search_space['dropout']),
+                'activation': random.choice(search_space['activation']),
+                'use_layer_norm': random.choice(search_space['use_layer_norm'])
+            }
+        }
+        
+        print(f"\nTrial {trial+1}/{n_trials}")
+        print(f"Config: {json.dumps(config, indent=2)}")
+        
+        try:
+            val_auc = train_with_config(config, train_loader, val_loader, device, max_epochs=50)
+            print(f"✓ Validation AUC: {val_auc:.4f}")
+            
+            results.append({
+                'trial': trial + 1,
+                'config': config,
+                'val_auc': val_auc
+            })
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            continue
+    
+    # Sort by validation AUC
+    results.sort(key=lambda x: x['val_auc'], reverse=True)
+    
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_df = pd.DataFrame([
+        {
+            'trial': r['trial'],
+            'val_auc': r['val_auc'],
+            **{k: str(v) for k, v in r['config'].items()}
+        }
+        for r in results
+    ])
+    results_df.to_csv(f'hyperparameter_search_{timestamp}.csv', index=False)
+    
+    print(f"\n{'='*80}")
+    print("TOP 5 CONFIGURATIONS")
+    print(f"{'='*80}\n")
+    
+    for i, result in enumerate(results[:5], 1):
+        print(f"{i}. Validation AUC: {result['val_auc']:.4f}")
+        print(f"   Config: {json.dumps(result['config'], indent=6)}\n")
+    
+    return results
+
+
+# =============================================================================
+# MANUAL TUNING - Try specific promising configurations
+# =============================================================================
+
+def manual_tuning_configs():
+    """Return list of manually selected promising configurations"""
+    
+    return [
+        # Config 1: Higher regularization
+        {
+            'name': 'high_regularization',
+            'lr': 1e-4,
+            'dropout': 0.7,
+            'weight_decay': 1e-3,
+            'optimizer': 'adamw',
+            'scheduler': 'cosine',
+            'use_class_weights': True,
+            'grad_clip': 0.5,
+            'early_stop_patience': 15,
+            'model': {
+                'img_hidden': 256,
+                'hand_hidden': 64,
+                'fusion_hidden': [128, 64],
+                'dropout': 0.7,
+                'activation': 'leaky_relu',
+                'use_layer_norm': True
+            }
+        },
+        # Config 2: Smaller network
+        {
+            'name': 'smaller_network',
+            'lr': 5e-5,
+            'dropout': 0.5,
+            'weight_decay': 1e-4,
+            'optimizer': 'adam',
+            'scheduler': 'plateau',
+            'use_class_weights': True,
+            'grad_clip': 1.0,
+            'early_stop_patience': 15,
+            'model': {
+                'img_hidden': 128,
+                'hand_hidden': 32,
+                'fusion_hidden': [64, 32],
+                'dropout': 0.5,
+                'activation': 'relu',
+                'use_layer_norm': True
+            }
+        },
+        # Config 3: Lower learning rate
+        {
+            'name': 'lower_lr',
+            'lr': 1e-5,
+            'dropout': 0.5,
+            'weight_decay': 1e-4,
+            'optimizer': 'adamw',
+            'scheduler': 'cosine',
+            'use_class_weights': True,
+            'grad_clip': 1.0,
+            'early_stop_patience': 20,
+            'model': {
+                'img_hidden': 256,
+                'hand_hidden': 64,
+                'fusion_hidden': [256, 128, 64],
+                'dropout': 0.5,
+                'activation': 'relu',
+                'use_layer_norm': True
+            }
+        },
+        # Config 4: Layer normalization focused
+        {
+            'name': 'layer_norm_focus',
+            'lr': 1e-4,
+            'dropout': 0.6,
+            'weight_decay': 5e-4,
+            'optimizer': 'adamw',
+            'scheduler': 'plateau',
+            'use_class_weights': True,
+            'grad_clip': 0.5,
+            'early_stop_patience': 15,
+            'model': {
+                'img_hidden': 256,
+                'hand_hidden': 64,
+                'fusion_hidden': [256, 128],
+                'dropout': 0.6,
+                'activation': 'leaky_relu',
+                'use_layer_norm': True
+            }
+        }
+    ]
 
 #=======================================================================================
 

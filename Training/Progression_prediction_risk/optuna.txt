@@ -1,0 +1,29 @@
+================================================================================
+OPTIMIZATION COMPLETE
+================================================================================
+
+Number of finished trials: 50
+Number of pruned trials: 24
+Number of complete trials: 26
+
+--------------------------------------------------------------------------------
+BEST TRIAL
+--------------------------------------------------------------------------------
+
+Validation AUC: 0.9365
+
+Best hyperparameters:
+  lr: 1.7345566642360933e-05
+  weight_decay: 0.0002669866674274458
+  optimizer: adam
+  scheduler: plateau
+  use_class_weights: True
+  grad_clip: 0.5
+  batch_size: 32
+  img_hidden: 256
+  hand_hidden: 64
+  n_fusion_layers: 1
+  dropout: 0.4
+  activation: leaky_relu
+  use_layer_norm: False
+  fusion_layer_0: 256
