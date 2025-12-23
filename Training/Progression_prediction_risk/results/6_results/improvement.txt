@@ -1,0 +1,10 @@
+Reduced even more parameters and increased dropout
+
+
+The model is:
+
+Stable
+
+Not overfitting
+
+Underpowered / under-informed

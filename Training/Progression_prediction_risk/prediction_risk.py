@@ -17,6 +17,72 @@ def collate_fn(batch):
     patient_ids = [item['patient_id'] for item in batch]
     return images, patient_ids
 
+HAND_FEATURE_ORDER = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis',
+    'age',
+    'sex',
+    'smoking_status'
+]
+
+NORMALIZE_FEATURES = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis',
+    'age'
+]
+
+
+"""
+# Run Optuna study
+study, best_trial = run_optuna_study(
+    train_loader, 
+    val_loader, 
+    device,
+    n_trials=50  # Adjust based on your time budget
+)
+
+# Train final model with best parameters
+final_model, history = train_with_best_params(
+    best_trial.params,
+    train_loader,
+    val_loader,
+    test_loader,
+    device,
+    max_epochs=100
+)
+
+Best hyperparameters:
+lr: 1.7345566642360933e-05
+weight_decay: 0.0002669866674274458
+optimizer: adam
+scheduler: plateau
+use_class_weights: True
+grad_clip: 0.5
+batch_size: 32
+img_hidden: 256
+hand_hidden: 64
+n_fusion_layers: 1
+dropout: 0.4
+activation: leaky_relu
+use_layer_norm: False
+fusion_layer_0: 256
+
+
+"""
 
 if __name__ == "__main__":
     
@@ -58,7 +124,22 @@ if __name__ == "__main__":
     cnn_model = cnn_model.to(device)
 
     # =============================================================================
-    # STEP 2: LOAD DATA
+    # STEP 2: TRAIN/VAL/TEST SPLIT
+    # =============================================================================
+    print("\n" + "="*80)
+    print("[3/10] LOADING TRAIN/VAL/TEST SPLITS")
+    print("="*80)
+
+    train_ids = pd.read_csv("Training/Progression_prediction_risk/data/train_patients_52w.csv")['Patient'].tolist()
+    val_ids   = pd.read_csv("Training/Progression_prediction_risk/data/val_patients_52w.csv")['Patient'].tolist()
+    test_ids  = pd.read_csv("Training/Progression_prediction_risk/data/test_patients_52w.csv")['Patient'].tolist()
+
+    print(f"✓ Train patients: {len(train_ids)}")
+    print(f"✓ Val patients: {len(val_ids)}")
+    print(f"✓ Test patients: {len(test_ids)}")
+
+    # =============================================================================
+    # STEP 3: LOAD DATA
     # =============================================================================
     print("\n" + "="*80)
     print("[2/10] LOADING DATA")
@@ -83,20 +164,7 @@ if __name__ == "__main__":
     for key, value in features_data[sample_patient].items():
         print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
 
-    # =============================================================================
-    # STEP 3: TRAIN/VAL/TEST SPLIT
-    # =============================================================================
-    print("\n" + "="*80)
-    print("[3/10] LOADING TRAIN/VAL/TEST SPLITS")
-    print("="*80)
-
-    train_ids = pd.read_csv("Training/Progression_prediction_risk/data/train_patients_52w.csv")['Patient'].tolist()
-    val_ids   = pd.read_csv("Training/Progression_prediction_risk/data/val_patients_52w.csv")['Patient'].tolist()
-    test_ids  = pd.read_csv("Training/Progression_prediction_risk/data/test_patients_52w.csv")['Patient'].tolist()
-
-    print(f"✓ Train patients: {len(train_ids)}")
-    print(f"✓ Val patients: {len(val_ids)}")
-    print(f"✓ Test patients: {len(test_ids)}")
+    
 
     # =============================================================================
     # STEP 4: EXTRACT FEATURES FROM SLICES
@@ -104,13 +172,14 @@ if __name__ == "__main__":
     print("\n" + "="*80)
     print("[4/10] EXTRACTING FEATURES FROM SLICES")
     print("="*80)
+    
 
     # Get all patient IDs (you might want to filter to train+val+test only)
     all_patient_ids = list(patient_data.keys())
     
     loader = DataLoader(
         SliceFeatureDataset(all_patient_ids, patient_data),
-        batch_size=16,
+        batch_size=32,
         shuffle=False,
         num_workers=4,
         collate_fn=collate_fn  # ADD CUSTOM COLLATE FUNCTION
@@ -141,6 +210,20 @@ if __name__ == "__main__":
     print(f"✓ Embedding shape: {sample_emb.shape}")
 
     # =============================================================================
+    # COMPUTE NORMALIZATION STATS (TRAIN ONLY)
+    # =============================================================================
+
+    feature_stats = compute_feature_stats(
+        handcrafted_dict=features_data,
+        patient_ids=train_ids,
+        feature_names=NORMALIZE_FEATURES
+    )
+
+    print("\n📊 Feature normalization stats (TRAIN only):")
+    for k, v in feature_stats.items():
+        print(f"   {k}: mean={v['mean']:.3f}, std={v['std']:.3f}")
+
+    # =============================================================================
     # STEP 5: CREATE MLP DATASETS
     # =============================================================================
     print("\n" + "="*80)
@@ -151,21 +234,24 @@ if __name__ == "__main__":
         label_csv=CSV_PATH_LABEL_52,
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
-        patient_list=train_ids
+        patient_list=train_ids,
+        feature_stats=feature_stats
     )
     
     val_ds = PatientMLPDataset(
         label_csv=CSV_PATH_LABEL_52,
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
-        patient_list=val_ids
+        patient_list=val_ids,
+        feature_stats=feature_stats
     )
     
     test_ds = PatientMLPDataset(
         label_csv=CSV_PATH_LABEL_52,
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
-        patient_list=test_ids
+        patient_list=test_ids,
+        feature_stats=feature_stats
     )
     
     print(f"✓ Train dataset: {len(train_ds)} patients")
@@ -179,6 +265,10 @@ if __name__ == "__main__":
     print(f"   x_hand shape: {sample['x_hand'].shape}")
     print(f"   y: {sample['y'].item()}")
     print(f"   patient_id: {sample['patient_id']}")
+
+    sample = train_ds[0]['x_hand']
+    print("Mean:", sample.mean().item())
+    print("Std:", sample.std().item())
     
     print("\n✅ Data preparation complete!")
 
@@ -200,49 +290,63 @@ if __name__ == "__main__":
     print(f"   Image embedding: {img_dim}")
     print(f"   Handcrafted features: {hand_dim}")
 
-    # Run Optuna study
-    study, best_trial = run_optuna_study(
-        train_loader, 
-        val_loader, 
-        device,
-        n_trials=50  # Adjust based on your time budget
-    )
+    # ============================================================================
+    # XGBOOST MODEL 
+    # ============================================================================
+    print("\n" + "="*80)
+    print("[5/10] INITIALIZING AND TRAINING XGBOOST MODEL")
+    print("="*80)
+
     
-    # Train final model with best parameters
-    final_model, history = train_with_best_params(
-        best_trial.params,
-        train_loader,
-        val_loader,
-        test_loader,
-        device,
-        max_epochs=100
-    )
 
 
 
 
-    """
+
+
+    # =============================================================================
+    # MLP MODEL 
+    # =============================================================================
+    print("\n" + "="*80)
+    print("[6/10] INITIALIZING AND TRAINING MLP MODEL")
+    print("="*80)
+    
     # Initialize model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = FusionMLP(
-        img_dim=img_dim,
-        hand_dim=hand_dim,
-        hidden_dims=[256, 128, 64],
-        dropout=0.3
-    ).to(device)
+
+
+   
+
+    model = SimpleFusionMLP(
+        img_dim=320,
+        hand_dim=12,
+        hidden=32,       
+        dropout=0.6         
+    ).to('cuda')
     
     print(f"\n✓ Model initialized with {sum(p.numel() for p in model.parameters())} parameters")
     
     # Train
     history = train_model(
         model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
+        train_loader=train_loader,  # Your train DataLoader with batch_size=32
+        val_loader=val_loader,      # Your validation DataLoader
         epochs=50,
-        lr=1e-3,
-        device=device
+        lr=1e-4,
+        weight_decay=1e-2,
+        grad_clip=1.0,
+        use_class_weights=True,
+        device='cuda'
     )
+
     
+    
+    
+
+    # Plotta la storia del training
+    plot_training_history(history, save_path='training_history.png')
+
+
     # Evaluate on test set
     print("\n" + "="*80)
     print("EVALUATING ON TEST SET")
@@ -255,6 +359,13 @@ if __name__ == "__main__":
     test_metrics, test_preds, test_labels, test_pids = validate(
         model, test_loader, criterion, device
     )
+
+    
+    # Valuta sul test set
+    test_metrics, test_preds, test_labels, _ = validate(model, test_loader, criterion, device)
+
+    # Plotta la ROC curve
+    plot_roc_curve(test_labels, test_preds, save_path='roc_curve.png')
     
     print(f"\n📊 Test Set Results:")
     print(f"   AUC: {test_metrics['auc']:.4f}")
@@ -270,4 +381,6 @@ if __name__ == "__main__":
     })
     results_df.to_csv('test_predictions.csv', index=False)
     print("\n✅ Predictions saved to 'test_predictions.csv'")
-    """
+
+
+    

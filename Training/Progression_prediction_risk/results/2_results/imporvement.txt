@@ -1,0 +1,10 @@
+Improved the overfitting by increasing regularization:
+Possible regularization:
+- Weight decay: {3e-4,1e-3,3e-3}
+- Aggresive dropout on embedding fusion , after concat and between MLP layers 
+    After concat:  p = 0.3 – 0.5
+    Hidden layers: p = 0.2 – 0.4
+Forces the model to not rely on specific CNN dimnesions
+
+
+-Normalize features!

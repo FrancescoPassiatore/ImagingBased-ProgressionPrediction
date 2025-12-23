@@ -13,7 +13,7 @@ BEST TRIAL
 Validation AUC: 0.9365
 
 Best hyperparameters:
-  lr: 1.7345566642360933e-05
+  lr: 1.7345566642360933e-05 -
   weight_decay: 0.0002669866674274458
   optimizer: adam
   scheduler: plateau

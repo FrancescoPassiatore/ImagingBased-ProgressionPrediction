@@ -22,8 +22,37 @@ from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fsco
 import optuna
 from optuna.trial import TrialState
 from torch.utils.data import DataLoader
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
+from sklearn.metrics import roc_curve
 
+HAND_FEATURE_ORDER = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis',
+    'age',
+    'sex',
+    'smoking_status'
+]
 
+NORMALIZE_FEATURES = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis',
+    'age'
+]
 class FusionMLPOptuna(nn.Module):
     """Flexible MLP architecture for Optuna optimization"""
     
@@ -652,11 +681,7 @@ class IPFDataLoaderPredictorProgression:
                 'age': get_safe_value(
                     patient_df['Age'].iloc[0], 'age'),
                 'sex': 1.0 if patient_df['Sex'].iloc[0] == 'Male' else 0.0,
-                'smoking_status': {
-                    'Never smoked': 0.0,
-                    'Ex-smoker': 1.0,
-                    'Currently smokes': 2.0
-                }.get(patient_df['SmokingStatus'].iloc[0], 0.0)
+                'smoking_status': 0.0 if patient_df['SmokingStatus'].iloc[0] == 'Never smoked' else 1.0
             }
 
             patient_data[patient_id] = {
@@ -726,7 +751,8 @@ class PatientMLPDataset(Dataset):
         label_csv,
         embeddings_dict,
         handcrafted_dict,
-        patient_list
+        patient_list,
+        feature_stats = None
     ):
         """
         Args:
@@ -752,6 +778,8 @@ class PatientMLPDataset(Dataset):
         if len(self.df) < len(patient_list):
             print(f"⚠️  Warning: Only {len(self.df)}/{len(patient_list)} patients have complete data")
 
+        self.feature_stats = feature_stats
+
     def __len__(self):
         return len(self.df)
 
@@ -759,13 +787,21 @@ class PatientMLPDataset(Dataset):
         row = self.df.iloc[idx]
         pid = row['Patient']
 
-        # Get CNN embedding
+        raw_feats = self.handcrafted[pid]
+        norm_feats = []
+
+        for k in HAND_FEATURE_ORDER:
+            v = raw_feats[k]
+            if k in self.feature_stats:
+                mean = self.feature_stats[k]['mean']
+                std = self.feature_stats[k]['std']
+                norm_feats.append((v - mean) / std)
+            else:
+                # sex, smoking_status
+                norm_feats.append(float(v))
+                
         x_img = torch.FloatTensor(self.embeddings[pid])
-        
-        # Get handcrafted features (preserve order)
-        x_hand = torch.FloatTensor(list(self.handcrafted[pid].values()))
-        
-        # Get label
+        x_hand = torch.FloatTensor(norm_feats)
         y = torch.FloatTensor([row['event_52']])
 
         return {
@@ -775,11 +811,37 @@ class PatientMLPDataset(Dataset):
             'patient_id': pid
         }
 
-
+class SimpleFusionMLP(nn.Module):
+    def __init__(self, img_dim=320, hand_dim=12, hidden=32, dropout=0.5):
+        super().__init__()
+        
+        # Un solo layer per img
+        self.img_fc = nn.Sequential(
+            nn.Linear(img_dim, hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Un solo layer per hand (opzionale)
+        self.hand_fc = nn.Sequential(
+            nn.Linear(hand_dim, hidden//4),  # Molto più piccolo
+            nn.LeakyReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Output diretto (NO fusion layer intermedia!)
+        self.output = nn.Linear(hidden + hidden//4, 1)
+    
+    def forward(self, img_emb, hand_feat):
+        img_out = self.img_fc(img_emb)
+        hand_out = self.hand_fc(hand_feat)
+        fused = torch.cat([img_out, hand_out], dim=1)
+        return self.output(fused)
+    
 class FusionMLP(nn.Module):
     """MLP that fuses CNN embeddings with handcrafted features"""
     
-    def __init__(self, img_dim=1280, hand_dim=12, hidden_dims=[256, 128, 64], dropout=0.3):
+    def __init__(self, img_dim=320, hand_dim=12,img_hidden=256, hand_hidden=64, fusion_layers=[128], dropout=0.4, activation='leaky_relu', use_layer_norm=False):
         """
         Args:
             img_dim: Dimension of CNN embedding
@@ -791,34 +853,43 @@ class FusionMLP(nn.Module):
         
         self.img_dim = img_dim
         self.hand_dim = hand_dim
-        
-        # Process image embeddings
-        self.img_fc = nn.Sequential(
-            nn.Linear(img_dim, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
+
+        if activation == 'leaky_relu':
+            act_fn = nn.LeakyReLU()
+        else:
+            act_fn = nn.ReLU()
+
+        norm_layer= nn.LayerNorm if use_layer_norm else nn.BatchNorm1d
+
+        img_layers = [
+            nn.Linear(img_dim, img_hidden),
+            norm_layer(img_hidden) if not use_layer_norm else norm_layer(img_hidden),
+            act_fn,
             nn.Dropout(dropout)
-        )
+        ]
+        self.img_fc = nn.Sequential(*img_layers)
         
-        # Process handcrafted features
-        self.hand_fc = nn.Sequential(
-            nn.Linear(hand_dim, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
+        hand_layers = [
+            nn.Linear(hand_dim, hand_hidden),
+            norm_layer(hand_hidden) if not use_layer_norm else norm_layer(hand_hidden),
+            act_fn,
             nn.Dropout(dropout)
-        )
+        ]
+        self.hand_fc = nn.Sequential(*hand_layers)
+
+
         
         # Fusion layers
-        fusion_input_dim = 256 + 64
+        fusion_input_dim = img_hidden + hand_hidden
         layers = []
         prev_dim = fusion_input_dim
         
-        for hidden_dim in hidden_dims:
+        for hidden_dim in fusion_layers:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
+                norm_layer(hidden_dim) if not use_layer_norm else norm_layer(hidden_dim),
+                act_fn,
+                nn.Dropout(0.5)
             ])
             prev_dim = hidden_dim
         
@@ -840,7 +911,8 @@ class FusionMLP(nn.Module):
         return out
 
 
-def train_epoch(model, loader, criterion, optimizer, device):
+
+def train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -861,6 +933,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
         
         # Backward pass
         loss.backward()
+
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
         optimizer.step()
         
         # Track metrics
@@ -909,8 +985,15 @@ def validate(model, loader, criterion, device):
     avg_loss = total_loss / len(loader)
     auc = roc_auc_score(all_labels, all_preds)
     
-    # Binary predictions at threshold 0.5
-    binary_preds = (np.array(all_preds) >= 0.5).astype(int)
+    # Find optimal threshold using Youden's J statistic
+    from sklearn.metrics import roc_curve
+    fpr, tpr, thresholds = roc_curve(all_labels, all_preds)
+    j_scores = tpr - fpr
+    optimal_idx = np.argmax(j_scores)
+    optimal_threshold = thresholds[optimal_idx]
+    
+    # Binary predictions at optimal threshold
+    binary_preds = (np.array(all_preds) >= optimal_threshold).astype(int)
     acc = accuracy_score(all_labels, binary_preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_labels, binary_preds, average='binary', zero_division=0
@@ -922,21 +1005,42 @@ def validate(model, loader, criterion, device):
         'accuracy': acc,
         'precision': precision,
         'recall': recall,
-        'f1': f1
+        'f1': f1,
+        'optimal_threshold': optimal_threshold
     }
     
     return metrics, all_preds, all_labels, all_pids
 
 
-def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device='cuda'):
+def train_model(model, train_loader, val_loader, epochs=50, lr=1.7345566642360933e-05, 
+                weight_decay=0.0002669866674274458, grad_clip=0.5, 
+                use_class_weights=True, device='cuda'):
     """Complete training loop"""
+
+    if use_class_weights:
+        all_labels =[]
+        for batch in train_loader:
+            all_labels.extend(batch['y'].numpy())
+        all_labels = np.array(all_labels)
+
+        #Calculate weights
+        n_samples = len(all_labels)
+        n_pos = all_labels.sum()
+        n_neg = n_samples - n_pos
+
+        pos_weight = torch.tensor([n_neg / n_pos], device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        print(f"Using class weights: pos_weight={pos_weight.item():.4f}")
+    else:
+        criterion = nn.BCEWithLogitsLoss()
     
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # More conservative scheduler to prevent LR collapse
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5
+        optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-7
     )
-    
+    patience = 10
+    no_improve_count = 0
     best_auc = 0
     best_epoch = 0
     history = {
@@ -953,13 +1057,14 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device='cud
         print("-" * 80)
         
         # Train
-        train_loss, train_auc = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_auc = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip)
         
         # Validate
         val_metrics, _, _, _ = validate(model, val_loader, criterion, device)
         
         # Update scheduler
         scheduler.step(val_metrics['auc'])
+        current_lr = optimizer.param_groups[0]['lr']
         
         # Save history
         history['train_loss'].append(train_loss)
@@ -971,13 +1076,21 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device='cud
         print(f"\nTrain Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f}")
         print(f"Val Loss: {val_metrics['loss']:.4f} | Val AUC: {val_metrics['auc']:.4f}")
         print(f"Val Acc: {val_metrics['accuracy']:.4f} | Val F1: {val_metrics['f1']:.4f}")
+        print(f"Learning Rate: {current_lr:.6e}")
+        print(f"Optimal Threshold: {val_metrics['optimal_threshold']:.4f}")
         
         # Save best model
         if val_metrics['auc'] > best_auc:
             best_auc = val_metrics['auc']
             best_epoch = epoch + 1
             torch.save(model.state_dict(), 'best_fusion_mlp.pth')
-            print(f"✅ New best model saved! (AUC: {best_auc:.4f})")
+            print(f"New best model saved! (AUC: {best_auc:.4f})")
+        else:
+            no_improve_count += 1
+        
+        if no_improve_count >= patience:
+            print("Early stopping triggered.")
+            break
     
     print("\n" + "="*80)
     print(f"TRAINING COMPLETED - Best AUC: {best_auc:.4f} at epoch {best_epoch}")
@@ -985,87 +1098,128 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device='cud
     
     return history
 
+def plot_training_history(history, save_path='training_history.png'):
+    """Plot training history with loss and metrics"""
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    epochs = range(1, len(history['train_loss']) + 1)
+    
+    # Plot 1: Loss
+    axes[0, 0].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
+    axes[0, 0].plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
+    axes[0, 0].set_xlabel('Epoch', fontsize=12)
+    axes[0, 0].set_ylabel('Loss', fontsize=12)
+    axes[0, 0].set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
+    axes[0, 0].legend(fontsize=10)
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Plot 2: AUC
+    axes[0, 1].plot(epochs, history['train_auc'], 'b-', label='Train AUC', linewidth=2)
+    axes[0, 1].plot(epochs, history['val_auc'], 'r-', label='Val AUC', linewidth=2)
+    axes[0, 1].set_xlabel('Epoch', fontsize=12)
+    axes[0, 1].set_ylabel('AUC', fontsize=12)
+    axes[0, 1].set_title('Training and Validation AUC', fontsize=14, fontweight='bold')
+    axes[0, 1].legend(fontsize=10)
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].set_ylim([0, 1])
+    
+    # Plot 3: Overfitting Gap (Train - Val)
+    auc_gap = [t - v for t, v in zip(history['train_auc'], history['val_auc'])]
+    axes[1, 0].plot(epochs, auc_gap, 'g-', linewidth=2)
+    axes[1, 0].axhline(y=0, color='k', linestyle='--', alpha=0.3)
+    axes[1, 0].set_xlabel('Epoch', fontsize=12)
+    axes[1, 0].set_ylabel('AUC Gap (Train - Val)', fontsize=12)
+    axes[1, 0].set_title('Overfitting Monitor', fontsize=14, fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].fill_between(epochs, 0, auc_gap, alpha=0.3, color='green')
+    
+    # Plot 4: Loss comparison
+    axes[1, 1].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2, alpha=0.7)
+    axes[1, 1].plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2, alpha=0.7)
+    
+    # Add best epoch marker
+    best_epoch_idx = np.argmax(history['val_auc'])
+    axes[1, 1].axvline(x=best_epoch_idx + 1, color='gold', linestyle='--', 
+                       linewidth=2, label=f'Best Epoch ({best_epoch_idx + 1})')
+    axes[1, 1].scatter([best_epoch_idx + 1], [history['val_loss'][best_epoch_idx]], 
+                       color='red', s=100, zorder=5, marker='*')
+    
+    axes[1, 1].set_xlabel('Epoch', fontsize=12)
+    axes[1, 1].set_ylabel('Loss', fontsize=12)
+    axes[1, 1].set_title('Loss with Best Epoch Marker', fontsize=14, fontweight='bold')
+    axes[1, 1].legend(fontsize=10)
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\n📊 Training history plot saved to: {save_path}")
+    plt.show()
+    
+    return fig
 
 
-class FusionMLPV2(nn.Module):
-    """Improved MLP with configurable architecture and regularization"""
+def plot_roc_curve(labels, predictions, save_path='roc_curve.png'):
+    """Plot ROC curve with optimal threshold"""
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import roc_curve, auc
     
-    def __init__(self, img_dim=1280, hand_dim=12, config=None):
-        super().__init__()
-        
-        # Default config
-        if config is None:
-            config = {
-                'img_hidden': 256,
-                'hand_hidden': 64,
-                'fusion_hidden': [256, 128, 64],
-                'dropout': 0.5,
-                'use_layer_norm': True,
-                'activation': 'relu'
-            }
-        
-        self.config = config
-        dropout = config['dropout']
-        
-        # Choose activation
-        if config['activation'] == 'relu':
-            act = nn.ReLU()
-        elif config['activation'] == 'leaky_relu':
-            act = nn.LeakyReLU(0.2)
-        elif config['activation'] == 'elu':
-            act = nn.ELU()
-        else:
-            act = nn.ReLU()
-        
-        # Image embedding processing
-        img_layers = [
-            nn.Linear(img_dim, config['img_hidden']),
-            nn.LayerNorm(config['img_hidden']) if config['use_layer_norm'] else nn.BatchNorm1d(config['img_hidden']),
-            act,
-            nn.Dropout(dropout)
-        ]
-        self.img_fc = nn.Sequential(*img_layers)
-        
-        # Handcrafted features processing
-        hand_layers = [
-            nn.Linear(hand_dim, config['hand_hidden']),
-            nn.LayerNorm(config['hand_hidden']) if config['use_layer_norm'] else nn.BatchNorm1d(config['hand_hidden']),
-            act,
-            nn.Dropout(dropout)
-        ]
-        self.hand_fc = nn.Sequential(*hand_layers)
-        
-        # Fusion layers
-        fusion_input = config['img_hidden'] + config['hand_hidden']
-        layers = []
-        prev_dim = fusion_input
-        
-        for hidden_dim in config['fusion_hidden']:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim) if config['use_layer_norm'] else nn.BatchNorm1d(hidden_dim),
-                act,
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-        
-        layers.append(nn.Linear(prev_dim, 1))
-        self.fusion = nn.Sequential(*layers)
-        
-        self.apply(self._init_weights)
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(labels, predictions)
+    roc_auc = auc(fpr, tpr)
     
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+    # Find optimal threshold
+    j_scores = tpr - fpr
+    optimal_idx = np.argmax(j_scores)
+    optimal_threshold = thresholds[optimal_idx]
+    optimal_fpr = fpr[optimal_idx]
+    optimal_tpr = tpr[optimal_idx]
     
-    def forward(self, x_img, x_hand):
-        img_feat = self.img_fc(x_img)
-        hand_feat = self.hand_fc(x_hand)
-        fused = torch.cat([img_feat, hand_feat], dim=1)
-        out = self.fusion(fused)
-        return out
+    # Plot
+    plt.figure(figsize=(10, 8))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, 
+             label=f'ROC curve (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random Classifier')
+    
+    # Mark optimal point
+    plt.scatter(optimal_fpr, optimal_tpr, color='red', s=200, zorder=5, 
+                marker='*', edgecolors='black', linewidths=2,
+                label=f'Optimal Threshold = {optimal_threshold:.3f}')
+    
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title('ROC Curve with Optimal Threshold', fontsize=14, fontweight='bold')
+    plt.legend(loc="lower right", fontsize=11)
+    plt.grid(True, alpha=0.3)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"📊 ROC curve saved to: {save_path}")
+    plt.show()
+    
+    return plt.gcf()
+
+def compute_feature_stats(handcrafted_dict,patient_ids,feature_names):
+    values = {k:[] for k in feature_names}
+
+    for pid in patient_ids:
+        for k in feature_names:
+            v = handcrafted_dict[pid][k]
+            if not np.isnan(v) and not np.isinf(v):
+                values[k].append(v)
+
+    stats = {}
+    for k, v in values.items():
+        v = np.array(v)
+        stats[k] = {
+            'mean': v.mean(),
+            'std': v.std() + 1e-6
+        }
+
+    return stats
+
+
 
 
 def train_with_config(config, train_loader, val_loader, device, max_epochs=50):
@@ -1287,98 +1441,10 @@ def grid_search(train_loader, val_loader, device):
     
     return results
 
+# ===============================================================
+# XGBOOST UTILITY
+# ===============================================================
 
-# =============================================================================
-# MANUAL TUNING - Try specific promising configurations
-# =============================================================================
-
-def manual_tuning_configs():
-    """Return list of manually selected promising configurations"""
-    
-    return [
-        # Config 1: Higher regularization
-        {
-            'name': 'high_regularization',
-            'lr': 1e-4,
-            'dropout': 0.7,
-            'weight_decay': 1e-3,
-            'optimizer': 'adamw',
-            'scheduler': 'cosine',
-            'use_class_weights': True,
-            'grad_clip': 0.5,
-            'early_stop_patience': 15,
-            'model': {
-                'img_hidden': 256,
-                'hand_hidden': 64,
-                'fusion_hidden': [128, 64],
-                'dropout': 0.7,
-                'activation': 'leaky_relu',
-                'use_layer_norm': True
-            }
-        },
-        # Config 2: Smaller network
-        {
-            'name': 'smaller_network',
-            'lr': 5e-5,
-            'dropout': 0.5,
-            'weight_decay': 1e-4,
-            'optimizer': 'adam',
-            'scheduler': 'plateau',
-            'use_class_weights': True,
-            'grad_clip': 1.0,
-            'early_stop_patience': 15,
-            'model': {
-                'img_hidden': 128,
-                'hand_hidden': 32,
-                'fusion_hidden': [64, 32],
-                'dropout': 0.5,
-                'activation': 'relu',
-                'use_layer_norm': True
-            }
-        },
-        # Config 3: Lower learning rate
-        {
-            'name': 'lower_lr',
-            'lr': 1e-5,
-            'dropout': 0.5,
-            'weight_decay': 1e-4,
-            'optimizer': 'adamw',
-            'scheduler': 'cosine',
-            'use_class_weights': True,
-            'grad_clip': 1.0,
-            'early_stop_patience': 20,
-            'model': {
-                'img_hidden': 256,
-                'hand_hidden': 64,
-                'fusion_hidden': [256, 128, 64],
-                'dropout': 0.5,
-                'activation': 'relu',
-                'use_layer_norm': True
-            }
-        },
-        # Config 4: Layer normalization focused
-        {
-            'name': 'layer_norm_focus',
-            'lr': 1e-4,
-            'dropout': 0.6,
-            'weight_decay': 5e-4,
-            'optimizer': 'adamw',
-            'scheduler': 'plateau',
-            'use_class_weights': True,
-            'grad_clip': 0.5,
-            'early_stop_patience': 15,
-            'model': {
-                'img_hidden': 256,
-                'hand_hidden': 64,
-                'fusion_hidden': [256, 128],
-                'dropout': 0.6,
-                'activation': 'leaky_relu',
-                'use_layer_norm': True
-            }
-        }
-    ]
-
-#=======================================================================================
 
 
 class IPFDataLoader:
