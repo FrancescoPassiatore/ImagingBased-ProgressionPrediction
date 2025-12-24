@@ -19,8 +19,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.optim as optim
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score
-import optuna
-from optuna.trial import TrialState
 from torch.utils.data import DataLoader
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
@@ -591,6 +589,17 @@ class IPFDataLoaderPredictorProgression:
         for patient_id in self.df['Patient'].unique():
             patient_df = self.df[self.df['Patient'] == patient_id]
             patient_df_features = self.df_features[self.df_features['Patient'] == patient_id]
+            
+            patient_df_sorted = patient_df.sort_values("Weeks")
+            
+            weeks = patient_df_sorted["Weeks"].astype(float).to_numpy()
+            fvc_values = patient_df_sorted["FVC"].astype(float).to_numpy()
+            
+            # Optional: remove NaN/Inf in FVC
+            mask = np.isfinite(weeks) & np.isfinite(fvc_values)
+            weeks = weeks[mask]
+            fvc_values = fvc_values[mask]
+            
 
             # Check if patient has NPY files
             patient_npy_folder = os.path.join(self.npy_dir, patient_id)
@@ -686,7 +695,9 @@ class IPFDataLoaderPredictorProgression:
 
             patient_data[patient_id] = {
                 'slices': npy_files,
-                'n_slices': len(npy_files)
+                'n_slices': len(npy_files),
+                "weeks":weeks,
+                "fvc_values":fvc_values,
             }
         
         if nan_count > 0:

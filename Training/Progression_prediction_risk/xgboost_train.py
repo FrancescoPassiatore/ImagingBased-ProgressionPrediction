@@ -10,6 +10,47 @@ import pandas as pd
 from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import xgboost as xgb
+from xgboost import XGBClassifier
+from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.model_selection import StratifiedKFold
+
+from xgboost.callback import EarlyStopping
+
+def compute_early_fvc_features(patient_data, max_week=12.0):
+    """
+    Returns dict: pid -> np.array([baseline_fvc, early_slope, early_pct_change])
+    Uses only measurements with Weeks <= max_week.
+    """
+    out = {}
+    for pid, pdata in patient_data.items():
+        if "weeks" not in pdata or "fvc_values" not in pdata:
+            continue
+
+        weeks = np.asarray(pdata["weeks"], dtype=float)
+        fvc = np.asarray(pdata["fvc_values"], dtype=float)
+
+        # Keep only early window
+        m = weeks <= max_week
+        if m.sum() < 2:
+            continue
+
+        w = weeks[m]
+        y = fvc[m]
+
+        # Baseline FVC = earliest in window (weeks already sorted)
+        fvc0 = y[0]
+
+        # Slope (ml/week): fit y = a*w + b
+        slope = np.polyfit(w, y, 1)[0]
+
+        # Percent change from baseline to last early point
+        pct_change = (y[-1] - fvc0) / fvc0 if fvc0 != 0 else 0.0
+
+        out[pid] = np.array([fvc0, slope, pct_change], dtype=float)
+
+    return out
+
 
 def collate_fn(batch):
     """Custom collate function to handle dictionary outputs"""
@@ -45,44 +86,26 @@ NORMALIZE_FEATURES = [
     'age'
 ]
 
+def ds_to_numpy(ds):
+    
+    X = []
+    y = []
+    pids = []
 
-"""
-# Run Optuna study
-study, best_trial = run_optuna_study(
-    train_loader, 
-    val_loader, 
-    device,
-    n_trials=50  # Adjust based on your time budget
-)
-
-# Train final model with best parameters
-final_model, history = train_with_best_params(
-    best_trial.params,
-    train_loader,
-    val_loader,
-    test_loader,
-    device,
-    max_epochs=100
-)
-
-Best hyperparameters:
-lr: 1.7345566642360933e-05
-weight_decay: 0.0002669866674274458
-optimizer: adam
-scheduler: plateau
-use_class_weights: True
-grad_clip: 0.5
-batch_size: 32
-img_hidden: 256
-hand_hidden: 64
-n_fusion_layers: 1
-dropout: 0.4
-activation: leaky_relu
-use_layer_norm: False
-fusion_layer_0: 256
+    for i in range(len(ds)):
+        sample = ds[i]
+        x_concat = np.concatenate([sample['x_img'].numpy(),sample['x_hand'].numpy()])
+        X.append(x_concat)
+        y.append(int(sample['y'].item()))
+        pids.append(sample['patient_id'])
+        
+    X = np.vstack(X)
+    y = np.array(y)
+    
+    return X, y, pids
 
 
-"""
+
 
 if __name__ == "__main__":
     
@@ -100,7 +123,7 @@ if __name__ == "__main__":
     
     cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
     cnn_model.load_state_dict(torch.load(
-        r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', 
+        r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', 
         map_location=torch.device('cpu')
     ))
 
@@ -110,7 +133,7 @@ if __name__ == "__main__":
     CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
     CSV_PATH_LABEL_52 = 'Training/Progression_prediction_risk/data/patient_progression_52w.csv'
     CSV_FEATURES_PATH = 'Training/CNN_Slope_Prediction/patient_features.csv'
-    NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
+    NPY_DIR = r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
 
     IMAGE_SIZE = (224, 224)
 
@@ -290,89 +313,107 @@ if __name__ == "__main__":
     print(f"   Image embedding: {img_dim}")
     print(f"   Handcrafted features: {hand_dim}")
     
+    X_train,y_train,pids_train = ds_to_numpy(train_ds)
+    X_val,y_val,pids_val = ds_to_numpy(val_ds)
+    X_test,y_test,pids_test = ds_to_numpy(test_ds)
+    
+    # ============================================================
+    # STRATIFIED CROSS-VALIDATION (HANDCRAFTED-ONLY)
+    # ============================================================
 
-
-
-
-
-
-    # =============================================================================
-    # MLP MODEL 
-    # =============================================================================
     print("\n" + "="*80)
-    print("[6/10] INITIALIZING AND TRAINING MLP MODEL")
+    print("[XGBOOST] STRATIFIED 5-FOLD CROSS-VALIDATION (HANDCRAFTED ONLY)")
     print("="*80)
+
+    # ------------------------------------------------------------
+    # 1. Build FULL dataset for CV (train + val + test)
+    # ------------------------------------------------------------
+    all_ds = torch.utils.data.ConcatDataset([train_ds, val_ds, test_ds])
+
+    X_all, y_all, pids_all = ds_to_numpy(all_ds)
     
-    # Initialize model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    early_fvc_dict = compute_early_fvc_features(patient_data, max_week=12.0)
+    keep_idx = [i for i, pid in enumerate(pids_all) if pid in early_fvc_dict]
+    
 
 
-   
+    X_all = X_all[keep_idx]
+    y_all = y_all[keep_idx]
+    pids_all = [pids_all[i] for i in keep_idx]
 
-    model = SimpleFusionMLP(
-        img_dim=320,
-        hand_dim=12,
-        hidden=32,       
-        dropout=0.6         
-    ).to('cuda')
-    
-    print(f"\n✓ Model initialized with {sum(p.numel() for p in model.parameters())} parameters")
-    
-    # Train
-    history = train_model(
-        model=model,
-        train_loader=train_loader,  # Your train DataLoader with batch_size=32
-        val_loader=val_loader,      # Your validation DataLoader
-        epochs=50,
-        lr=1e-4,
-        weight_decay=1e-2,
-        grad_clip=1.0,
-        use_class_weights=True,
-        device='cuda'
-    )
+    X_hand = X_all[:, -12:]
+    X_fvc = np.vstack([early_fvc_dict[pid] for pid in pids_all])
 
-    
-    
+    X_final = np.concatenate([X_hand, X_fvc], axis=1)
+    print("Patients with early FVC:", len(early_fvc_dict))
+    print("After filtering:", X_final.shape, y_all.shape)
+    print("Any NaN in X_final:", np.isnan(X_final).any())
     
 
-    # Plotta la storia del training
-    plot_training_history(history, save_path='training_history.png')
+    print(f"✓ Total patients for CV: {len(y_all)}")
+    print(f"✓ Positive cases: {y_all.sum()}")
+    print(f"✓ Feature shape: {X_hand.shape}")
 
+    # ------------------------------------------------------------
+    # 2. Stratified K-Fold
+    # ------------------------------------------------------------
+    n_splits = 5
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-    # Evaluate on test set
-    print("\n" + "="*80)
-    print("EVALUATING ON TEST SET")
-    print("="*80)
-    
-    # Load best model
-    model.load_state_dict(torch.load('best_fusion_mlp.pth'))
-    
-    criterion = nn.BCEWithLogitsLoss()
-    test_metrics, test_preds, test_labels, test_pids = validate(
-        model, test_loader, criterion, device
-    )
+    auc_scores = []
 
-    
-    # Valuta sul test set
-    test_metrics, test_preds, test_labels, _ = validate(model, test_loader, criterion, device)
+    # ------------------------------------------------------------
+    # 3. CV loop
+    # ------------------------------------------------------------
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_final, y_all), 1):
+        X_tr, X_va = X_final[train_idx], X_final[val_idx]
+        y_tr, y_va = y_all[train_idx], y_all[val_idx]
 
-    # Plotta la ROC curve
-    plot_roc_curve(test_labels, test_preds, save_path='roc_curve.png')
-    
-    print(f"\n📊 Test Set Results:")
-    print(f"   AUC: {test_metrics['auc']:.4f}")
-    print(f"   Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"   Precision: {test_metrics['precision']:.4f}")
-    print(f"   Recall: {test_metrics['recall']:.4f}")
-    print(f"   F1 Score: {test_metrics['f1']:.4f}")
-    
-    results_df = pd.DataFrame({
-        'patient_id': test_pids,
-        'true_label': test_labels,
-        'predicted_prob': test_preds
-    })
-    results_df.to_csv('test_predictions.csv', index=False)
-    print("\n✅ Predictions saved to 'test_predictions.csv'")
+        # class imbalance per fold
+        scale_pos_weight = (y_tr == 0).sum() / (y_tr == 1).sum()
 
+        dtrain = xgb.DMatrix(X_tr, label=y_tr)
+        dval   = xgb.DMatrix(X_va, label=y_va)
 
-    
+        params = {
+            "objective": "binary:logistic",
+            "eval_metric": "auc",
+            "max_depth": 3,
+            "eta": 0.05,
+            "min_child_weight": 1,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "scale_pos_weight": scale_pos_weight,
+            "seed": 42,
+            "nthread": -1,
+        }
+
+        booster = xgb.train(
+            params=params,
+            dtrain=dtrain,
+            num_boost_round=500,
+            evals=[(dval, "val")],
+            early_stopping_rounds=30,
+            verbose_eval=False
+        )
+
+        y_va_prob = booster.predict(dval)
+        auc = roc_auc_score(y_va, y_va_prob)
+        auc_scores.append(auc)
+
+        print(
+            f"Fold {fold} | "
+            f"AUC = {auc:.3f} | "
+            f"best_iter = {booster.best_iteration}"
+        )
+
+    # ------------------------------------------------------------
+    # 4. CV summary
+    # ------------------------------------------------------------
+    auc_scores = np.array(auc_scores)
+
+    print("\n=== CROSS-VALIDATION SUMMARY ===")
+    print(f"Mean AUC: {auc_scores.mean():.3f}")
+    print(f"Std  AUC: {auc_scores.std():.3f}")
+    print(f"AUCs per fold: {np.round(auc_scores, 3)}")
