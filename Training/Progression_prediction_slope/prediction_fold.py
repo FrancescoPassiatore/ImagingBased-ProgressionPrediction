@@ -454,13 +454,13 @@ if __name__ == "__main__":
 
     # 1. Load models
     cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
-    cnn_model.load_state_dict(torch.load(r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
+    cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
     
     corrector_model = SlopeCorrector(input_dim=13)
-    corrector_model.load_state_dict(torch.load(r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\corrector_full.pth', map_location=torch.device('cpu')))
+    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\corrector_full.pth', map_location=torch.device('cpu')))
     
     # Load scaler
-    with open(r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\scaler_full.pkl', 'rb') as f:
+    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\scaler_full.pkl', 'rb') as f:
         scaler, feature_cols = pickle.load(f)
 
     print(f"✓ Loaded corrector with {len(feature_cols)} features:")
@@ -477,7 +477,7 @@ if __name__ == "__main__":
     # Paths
     CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
     CSV_FEATURES_PATH = 'Training/CNN_Slope_Prediction/patient_features.csv'
-    NPY_DIR = r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
+    NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
 
     # Hyperparameters
     IMAGE_SIZE = (224, 224)
