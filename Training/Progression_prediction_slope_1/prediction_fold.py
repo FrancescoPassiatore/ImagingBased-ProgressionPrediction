@@ -21,7 +21,6 @@ from tqdm import tqdm
 #Get utilites from utilities.py
 from utilities import *
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import StratifiedKFold
 
 def get_patient_progression_labels(patient_data):
     labels = {}
@@ -515,244 +514,126 @@ if __name__ == "__main__":
         print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
 
     # =============================================================================
-    # STEP 3: TRAIN/TEST SPLIT
+    # EVALUATE ALL PATIENTS
     # =============================================================================
-
-    """print("\n" + "="*80)
-    print("[2/10] CREATING TRAIN/TEST SPLIT")
+    
+    print("\n" + "="*80)
+    print("[EVALUATION] PROGRESSION PREDICTION ON ALL PATIENTS")
     print("="*80)
-
-    all_patients = list(patient_data.keys())
-    print(f"\n✓ Total patients available: {len(all_patients)}")
-
-    # Recreate exact same split as training
-    np.random.seed(42)
-    np.random.shuffle(all_patients)
-
-    test_size = int(len(all_patients) * 0.2)
-    test_patients = all_patients[:test_size]
-    train_patients = all_patients[test_size:]
-
-    print(f"✓ Train patients: {len(train_patients)}")
-    print(f"✓ Test patients:  {len(test_patients)}")
-    print(f"\n📝 First 5 test patients: {test_patients[:5]}")
-    print(f"📝 First 5 train patients: {train_patients[:5]}")
-
-    # Verify no overlap
-    overlap = set(train_patients) & set(test_patients)
-    if overlap:
-        print(f"❌ ERROR: {len(overlap)} patients in both train and test!")
-    else:
-        print(f"✓ No patient overlap between train and test")"""
-        
+    
+    # Get progression labels for all patients
     patient_labels = get_patient_progression_labels(patient_data)
-
-    patient_ids = np.array(list(patient_labels.keys()))
-    y_patients = np.array([patient_labels[p] for p in patient_ids])
-
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    all_patients = list(patient_labels.keys())
     
-    all_fold_metrics = []
-
+    print(f"\n✓ Total patients: {len(all_patients)}")
+    print(f"✓ Progression cases: {sum(patient_labels.values())}")
+    print(f"✓ Stable cases: {len(all_patients) - sum(patient_labels.values())}")
+    
+    # Create dataset with all patients
+    dataset = IPFSliceDataset(
+        all_patients,
+        patient_data,
+        features_data,
+        normalize_slope=True,
+        image_size=IMAGE_SIZE
+    )
+    
+    print(f"\n✓ Dataset created:")
+    print(f"   Total slices: {len(dataset)}")
+    print(f"   Patients: {len(dataset.patients)}")
+    
+    # Initialize predictor (frozen models)
+    predictor = ProgressionPredictor(
+        cnn_model=cnn_model,
+        corrector_model=corrector_model,
+        scaler=scaler,
+        patient_data=patient_data,
+        features_data=features_data,
+        feature_cols=feature_cols,
+        slope_scaler=dataset.slope_scaler,
+        device=device
+    )
+    
+    print("\n✓ Predictor initialized with frozen models")
+    
+    # Evaluate all patients
+    print("\nRunning predictions...")
+    metrics, results_df = predictor.evaluate_progression_accuracy(
+        dataset,
+        all_patients
+    )
+    
+    # Display results
     print("\n" + "="*80)
-    print("[CV] PATIENT-LEVEL STRATIFIED CROSS-VALIDATION")
+    print("PROGRESSION PREDICTION RESULTS")
     print("="*80)
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(patient_ids, y_patients), 1):
-        print(f"\n--- Fold {fold} ---")
-
-        train_patients = patient_ids[train_idx].tolist()
-        val_patients   = patient_ids[val_idx].tolist()
-
-        print(f"Train patients: {len(train_patients)}")
-        print(f"Val patients:   {len(val_patients)}")
-        print(f"Val positives: {sum(patient_labels[p] for p in val_patients)}")
-
-        # --------------------------------------------------
-        # Build datasets for this fold
-        # --------------------------------------------------
-        train_ds = IPFSliceDataset(
-            train_patients,
-            patient_data,
-            features_data,
-            normalize_slope=True,
-            image_size=IMAGE_SIZE
-        )
-
-        val_ds = IPFSliceDataset(
-            val_patients,
-            patient_data,
-            features_data,
-            normalize_slope=True,
-            image_size=IMAGE_SIZE
-        )
-
-        # IMPORTANT: share slope scaler
-        val_ds.slope_scaler = train_ds.slope_scaler
-
-        # --------------------------------------------------
-        # Initialize predictor (models are frozen)
-        # --------------------------------------------------
-        predictor = ProgressionPredictor(
-            cnn_model=cnn_model,
-            corrector_model=corrector_model,
-            scaler=scaler,
-            patient_data=patient_data,
-            features_data=features_data,
-            feature_cols=feature_cols,
-            slope_scaler=train_ds.slope_scaler,
-            device=device
-        )
-
-        # --------------------------------------------------
-        # Evaluate fold
-        # --------------------------------------------------
-        metrics, _ = predictor.evaluate_progression_accuracy(
-            val_ds,
-            val_patients
-        )
-
-        print(
-            f"Fold {fold} | "
-            f"Acc={metrics['accuracy']:.3f} | "
-            f"Prec={metrics['precision']:.3f} | "
-            f"Rec={metrics['recall']:.3f} | "
-            f"F1={metrics['f1_score']:.3f}"
-        )
-
-        all_fold_metrics.append(metrics)
-        
-    print("\n" + "="*80)
-    print("[CV] SUMMARY")
-    print("="*80)
-
-    def mean_std(key):
-        vals = [m[key] for m in all_fold_metrics]
-        return np.mean(vals), np.std(vals)
-
-    for k in ["accuracy", "precision", "recall", "f1_score"]:
-        m, s = mean_std(k)
-        print(f"{k:10s}: {m:.3f} ± {s:.3f}")
-
-    print(f"\nTotal patients evaluated: {sum(m['n_patients'] for m in all_fold_metrics)}")
-    print(f"Total progressions: {sum(m['n_progression'] for m in all_fold_metrics)}")
+    print(f"\nAccuracy:  {metrics['accuracy']:.3f}")
+    print(f"Precision: {metrics['precision']:.3f}")
+    print(f"Recall:    {metrics['recall']:.3f}")
+    print(f"F1-Score:  {metrics['f1_score']:.3f}")
+    
+    print(f"\nConfusion Matrix:")
+    print(f"  {metrics['confusion_matrix']}")
+    
+    print(f"\nPatient Distribution:")
+    print(f"  Total evaluated: {metrics['n_patients']}")
+    print(f"  True progressions: {metrics['n_progression']}")
+    print(f"  True stable: {metrics['n_stable']}")
     
     # =============================================================================
-    # SAVE AGGREGATED PREDICTIONS FOR COMPARISON
+    # SAVE PREDICTIONS
     # =============================================================================
     print("\n" + "="*80)
-    print("[SAVE] AGGREGATING PREDICTIONS FROM ALL FOLDS")
+    print("[SAVE] SAVING PREDICTIONS")
     print("="*80)
     
-    # Dictionary to collect predictions from all folds
-    fold_predictions = {}  # {patient_id: [(is_prog, probability, fold), ...]}
+    # Aggregate by patient for final predictions
+    patient_predictions = []
     
-    for fold, (train_idx, val_idx) in enumerate(skf.split(patient_ids, y_patients), 1):
-        train_patients = patient_ids[train_idx].tolist()
-        val_patients   = patient_ids[val_idx].tolist()
-
-        # Build datasets
-        train_ds = IPFSliceDataset(
-            train_patients,
-            patient_data,
-            features_data,
-            normalize_slope=True,
-            image_size=IMAGE_SIZE
-        )
-
-        val_ds = IPFSliceDataset(
-            val_patients,
-            patient_data,
-            features_data,
-            normalize_slope=True,
-            image_size=IMAGE_SIZE
-        )
-        val_ds.slope_scaler = train_ds.slope_scaler
-
-        # Initialize predictor
-        predictor = ProgressionPredictor(
-            cnn_model=cnn_model,
-            corrector_model=corrector_model,
-            scaler=scaler,
-            patient_data=patient_data,
-            features_data=features_data,
-            feature_cols=feature_cols,
-            slope_scaler=train_ds.slope_scaler,
-            device=device
-        )
-
-        # Get predictions for validation set (suppress verbose output)
-        import sys
-        from io import StringIO
-        old_stdout = sys.stdout
-        sys.stdout = StringIO()
+    for patient_id in all_patients:
+        patient_results = results_df[results_df['patient_id'] == patient_id]
         
-        results_df = predictor.predict_test_set(val_ds, val_patients, use_corrector=True)
+        if len(patient_results) == 0:
+            continue
         
-        sys.stdout = old_stdout
+        # Get maximum decline as confidence
+        max_decline = patient_results['decline_percent'].max()
+        is_progression = int(np.any(patient_results['is_progression']))
         
-        # Group by patient - collect all predictions
-        for patient_id in val_patients:
-            patient_results = results_df[results_df['patient_id'] == patient_id]
-            
-            if len(patient_results) == 0:
-                continue
-            
-            # Get maximum decline percent as confidence
-            max_decline = patient_results['decline_percent'].max()
-            is_progression = int(np.any(patient_results['is_progression']))
-            
-            # Probability: normalized decline (0 = 0%, 1 = 10% threshold, >1 = more)
-            probability = max(0.0, min(max_decline / 10.0, 1.0))
-            
-            if patient_id not in fold_predictions:
-                fold_predictions[patient_id] = []
-            
-            fold_predictions[patient_id].append({
-                'is_progression': is_progression,
-                'probability': probability,
-                'max_decline': max_decline,
-                'fold': fold
-            })
-    
-    # Aggregate predictions: majority vote + mean probability
-    final_predictions = []
-    
-    for patient_id in sorted(fold_predictions.keys()):
-        fold_preds = fold_predictions[patient_id]
+        # Probability: normalized decline (0-1 scale, 1.0 = 10% threshold)
+        probability = float(max(0.0, min(max_decline / 10.0, 1.0)))
         
-        # Majority vote for is_progression
-        prog_votes = [p['is_progression'] for p in fold_preds]
-        final_is_progression = int(np.mean(prog_votes) > 0.5)
+        # True label
+        true_label = patient_labels.get(patient_id, None)
         
-        # Mean probability
-        final_probability = float(np.mean([p['probability'] for p in fold_preds]))
-        
-        # Mean decline
-        final_decline = float(np.mean([p['max_decline'] for p in fold_preds]))
-        
-        final_predictions.append({
+        patient_predictions.append({
             'patient_id': patient_id,
-            'is_progression': final_is_progression,
-            'probability': final_probability,
-            'max_decline_percent': final_decline,
-            'n_folds': len(fold_preds)
+            'predicted_progression': is_progression,
+            'true_progression': true_label,
+            'probability': probability,
+            'max_decline_percent': float(max_decline),
+            'correct': (is_progression == true_label) if true_label is not None else None
         })
     
     # Save to CSV
-    final_df = pd.DataFrame(final_predictions)
-    final_df.to_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\prediction_fold_final.csv', index=False)
+    final_df = pd.DataFrame(patient_predictions)
+    final_df.to_csv('prediction_fold_final.csv', index=False)
     
-    print(f"\n✅ FINAL PREDICTIONS SAVED")
-    print(f"   Location: D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\prediction_fold_final.csv")
+    print(f"\n✅ PREDICTIONS SAVED")
+    print(f"   Location: prediction_fold_final.csv")
     print(f"   Total patients: {len(final_df)}")
-    print(f"   Predicted progressions: {final_df['is_progression'].sum()}")
-    print(f"   Predicted stable: {len(final_df) - final_df['is_progression'].sum()}")
-    print(f"\n   Mean probability (all): {final_df['probability'].mean():.3f}")
-    print(f"   Mean decline % (all): {final_df['max_decline_percent'].mean():.2f}%")
+    print(f"   Predicted progressions: {final_df['predicted_progression'].sum()}")
+    print(f"   Predicted stable: {len(final_df) - final_df['predicted_progression'].sum()}")
+    print(f"   Correct predictions: {final_df['correct'].sum()}")
+    print(f"\n   Mean probability: {final_df['probability'].mean():.3f}")
+    print(f"   Mean decline %: {final_df['max_decline_percent'].mean():.2f}%")
     
     print("\n📋 PREVIEW (first 10 rows):")
-    print(final_df.head(10))
+    print(final_df.head(10).to_string())
+    
+    print("\n" + "="*80)
+    print("✅ EVALUATION COMPLETE")
+    print("="*80)
 
 
 
