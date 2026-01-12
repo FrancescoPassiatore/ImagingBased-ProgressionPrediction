@@ -454,13 +454,13 @@ if __name__ == "__main__":
 
     # 1. Load models
     cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
-    cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu')))
+    cnn_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\checkpoints_kfold_added_hf_tabular_attention_adj_lr\checkpoints_kfold_added_hf_tabular_attention_adj_lr\cnn_final.pth', map_location=torch.device('cpu'), weights_only=False))
     
     corrector_model = SlopeCorrector(input_dim=13)
-    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\corrector_full.pth', map_location=torch.device('cpu')))
+    corrector_model.load_state_dict(torch.load(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope_1\files\corrector_full.pth', map_location=torch.device('cpu'), weights_only=False))
     
     # Load scaler
-    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope\files\scaler_full.pkl', 'rb') as f:
+    with open(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_slope_1\files\scaler_full.pkl', 'rb') as f:
         scaler, feature_cols = pickle.load(f)
 
     print(f"✓ Loaded corrector with {len(feature_cols)} features:")
@@ -636,6 +636,123 @@ if __name__ == "__main__":
 
     print(f"\nTotal patients evaluated: {sum(m['n_patients'] for m in all_fold_metrics)}")
     print(f"Total progressions: {sum(m['n_progression'] for m in all_fold_metrics)}")
+    
+    # =============================================================================
+    # SAVE AGGREGATED PREDICTIONS FOR COMPARISON
+    # =============================================================================
+    print("\n" + "="*80)
+    print("[SAVE] AGGREGATING PREDICTIONS FROM ALL FOLDS")
+    print("="*80)
+    
+    # Dictionary to collect predictions from all folds
+    fold_predictions = {}  # {patient_id: [(is_prog, probability, fold), ...]}
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(patient_ids, y_patients), 1):
+        train_patients = patient_ids[train_idx].tolist()
+        val_patients   = patient_ids[val_idx].tolist()
+
+        # Build datasets
+        train_ds = IPFSliceDataset(
+            train_patients,
+            patient_data,
+            features_data,
+            normalize_slope=True,
+            image_size=IMAGE_SIZE
+        )
+
+        val_ds = IPFSliceDataset(
+            val_patients,
+            patient_data,
+            features_data,
+            normalize_slope=True,
+            image_size=IMAGE_SIZE
+        )
+        val_ds.slope_scaler = train_ds.slope_scaler
+
+        # Initialize predictor
+        predictor = ProgressionPredictor(
+            cnn_model=cnn_model,
+            corrector_model=corrector_model,
+            scaler=scaler,
+            patient_data=patient_data,
+            features_data=features_data,
+            feature_cols=feature_cols,
+            slope_scaler=train_ds.slope_scaler,
+            device=device
+        )
+
+        # Get predictions for validation set (suppress verbose output)
+        import sys
+        from io import StringIO
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        
+        results_df = predictor.predict_test_set(val_ds, val_patients, use_corrector=True)
+        
+        sys.stdout = old_stdout
+        
+        # Group by patient - collect all predictions
+        for patient_id in val_patients:
+            patient_results = results_df[results_df['patient_id'] == patient_id]
+            
+            if len(patient_results) == 0:
+                continue
+            
+            # Get maximum decline percent as confidence
+            max_decline = patient_results['decline_percent'].max()
+            is_progression = int(np.any(patient_results['is_progression']))
+            
+            # Probability: normalized decline (0 = 0%, 1 = 10% threshold, >1 = more)
+            probability = max(0.0, min(max_decline / 10.0, 1.0))
+            
+            if patient_id not in fold_predictions:
+                fold_predictions[patient_id] = []
+            
+            fold_predictions[patient_id].append({
+                'is_progression': is_progression,
+                'probability': probability,
+                'max_decline': max_decline,
+                'fold': fold
+            })
+    
+    # Aggregate predictions: majority vote + mean probability
+    final_predictions = []
+    
+    for patient_id in sorted(fold_predictions.keys()):
+        fold_preds = fold_predictions[patient_id]
+        
+        # Majority vote for is_progression
+        prog_votes = [p['is_progression'] for p in fold_preds]
+        final_is_progression = int(np.mean(prog_votes) > 0.5)
+        
+        # Mean probability
+        final_probability = float(np.mean([p['probability'] for p in fold_preds]))
+        
+        # Mean decline
+        final_decline = float(np.mean([p['max_decline'] for p in fold_preds]))
+        
+        final_predictions.append({
+            'patient_id': patient_id,
+            'is_progression': final_is_progression,
+            'probability': final_probability,
+            'max_decline_percent': final_decline,
+            'n_folds': len(fold_preds)
+        })
+    
+    # Save to CSV
+    final_df = pd.DataFrame(final_predictions)
+    final_df.to_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\prediction_fold_final.csv', index=False)
+    
+    print(f"\n✅ FINAL PREDICTIONS SAVED")
+    print(f"   Location: D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\prediction_fold_final.csv")
+    print(f"   Total patients: {len(final_df)}")
+    print(f"   Predicted progressions: {final_df['is_progression'].sum()}")
+    print(f"   Predicted stable: {len(final_df) - final_df['is_progression'].sum()}")
+    print(f"\n   Mean probability (all): {final_df['probability'].mean():.3f}")
+    print(f"   Mean decline % (all): {final_df['max_decline_percent'].mean():.2f}%")
+    
+    print("\n📋 PREVIEW (first 10 rows):")
+    print(final_df.head(10))
 
 
 
