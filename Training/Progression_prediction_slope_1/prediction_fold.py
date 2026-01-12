@@ -315,14 +315,25 @@ class ProgressionPredictor:
         y_pred = np.array(y_pred)
         
         # Compute metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score, roc_curve, average_precision_score
+        
+        # Get probabilities for AUC calculation
+        y_probs = results_df.groupby('patient_id')['decline_percent'].max().values
+        y_probs_normalized = np.clip(y_probs / 10.0, 0, 1)  # Normalize to [0,1]
         
         metrics = {
             'accuracy': accuracy_score(y_true, y_pred),
             'precision': precision_score(y_true, y_pred, zero_division=0),
             'recall': recall_score(y_true, y_pred, zero_division=0),
             'f1_score': f1_score(y_true, y_pred, zero_division=0),
+            'specificity': confusion_matrix(y_true, y_pred)[0, 0] / (confusion_matrix(y_true, y_pred)[0, 0] + confusion_matrix(y_true, y_pred)[0, 1] + 1e-7),
+            'auc_roc': roc_auc_score(y_true, y_probs_normalized),
+            'ap': average_precision_score(y_true, y_probs_normalized),
             'confusion_matrix': confusion_matrix(y_true, y_pred),
+            'roc_curve': roc_curve(y_true, y_probs_normalized),
+            'y_true': y_true,
+            'y_pred': y_pred,
+            'y_probs': y_probs_normalized,
             'n_patients': len(y_true),
             'n_progression': y_true.sum(),
             'n_stable': (~y_true).sum(),
@@ -571,6 +582,9 @@ if __name__ == "__main__":
     print(f"Precision: {metrics['precision']:.3f}")
     print(f"Recall:    {metrics['recall']:.3f}")
     print(f"F1-Score:  {metrics['f1_score']:.3f}")
+    print(f"Specificity: {metrics['specificity']:.3f}")
+    print(f"AUC-ROC:   {metrics['auc_roc']:.3f}")
+    print(f"AP:        {metrics['ap']:.3f}")
     
     print(f"\nConfusion Matrix:")
     print(f"  {metrics['confusion_matrix']}")
@@ -579,6 +593,77 @@ if __name__ == "__main__":
     print(f"  Total evaluated: {metrics['n_patients']}")
     print(f"  True progressions: {metrics['n_progression']}")
     print(f"  True stable: {metrics['n_stable']}")
+    
+    # =============================================================================
+    # VISUALIZE RESULTS
+    # =============================================================================
+    print("\n" + "="*80)
+    print("[VISUALIZE] CREATING EVALUATION PLOTS")
+    print("="*80)
+    
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.metrics import precision_recall_curve
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 1. ROC Curve
+    fpr, tpr, _ = metrics['roc_curve']
+    ax = axes[0, 0]
+    ax.plot(fpr, tpr, color='#e74c3c', lw=2.5, label=f'ROC Curve (AUC = {metrics["auc_roc"]:.3f})')
+    ax.plot([0, 1], [0, 1], color='gray', lw=2, linestyle='--', label='Random Classifier')
+    ax.set_xlabel('False Positive Rate', fontsize=11)
+    ax.set_ylabel('True Positive Rate', fontsize=11)
+    ax.set_title('ROC Curve', fontsize=12, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Confusion Matrix Heatmap
+    cm = metrics['confusion_matrix']
+    ax = axes[0, 1]
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False,
+                xticklabels=['Stable', 'Progression'],
+                yticklabels=['Stable', 'Progression'])
+    ax.set_xlabel('Predicted', fontsize=11)
+    ax.set_ylabel('True', fontsize=11)
+    ax.set_title('Confusion Matrix', fontsize=12, fontweight='bold')
+    
+    # 3. Metrics Bar Chart
+    ax = axes[1, 0]
+    metric_names = ['Accuracy', 'Precision', 'Recall', 'Specificity', 'F1-Score']
+    metric_values = [
+        metrics['accuracy'],
+        metrics['precision'],
+        metrics['recall'],
+        metrics['specificity'],
+        metrics['f1_score']
+    ]
+    colors = ['#3498db', '#e74c3c', '#f39c12', '#2ecc71', '#9b59b6']
+    bars = ax.bar(metric_names, metric_values, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+    ax.set_ylabel('Score', fontsize=11)
+    ax.set_title('Classification Metrics', fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.0])
+    ax.grid(True, alpha=0.3, axis='y')
+    for bar, val in zip(bars, metric_values):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02, 
+               f'{val:.3f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    # 4. Precision-Recall Curve
+    precision, recall, _ = precision_recall_curve(metrics['y_true'], metrics['y_probs'])
+    ax = axes[1, 1]
+    ax.plot(recall, precision, color='#e74c3c', lw=2.5, label=f'PR Curve (AP = {metrics["ap"]:.3f})')
+    ax.set_xlabel('Recall', fontsize=11)
+    ax.set_ylabel('Precision', fontsize=11)
+    ax.set_title('Precision-Recall Curve', fontsize=12, fontweight='bold')
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1])
+    
+    plt.tight_layout()
+    plt.savefig('progression_prediction_evaluation.png', dpi=300, bbox_inches='tight')
+    print("\n✅ PLOTS SAVED: progression_prediction_evaluation.png")
+    plt.show()
     
     # =============================================================================
     # SAVE PREDICTIONS
