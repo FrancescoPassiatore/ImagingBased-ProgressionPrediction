@@ -216,7 +216,7 @@ class ProgressionPredictor:
         
         # Step 4: Get baseline FVC and predict trajectory
         pdata = self.patient_data[patient_id]
-        baseline_fvc = pdata['fvc_values'][0]  # First measurement
+        baseline_fvc = pdata['intercept']  # FVC intercept at baseline
         baseline_week = pdata['weeks'][0]
         PROGRESSION_TIMEPOINTS = pdata['weeks']  # weeks
         # Predict at standard timepoints

@@ -319,7 +319,7 @@ if __name__ == "__main__":
     print("\n[3/4] Computing true labels...")
     
     # Load patient data to get baseline FVC
-    from utilities import IPFDataLoader
+    from Training.Comparison_1_3.utilities import IPFDataLoader
     
     CSV_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv'
     CSV_FEATURES_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv'
