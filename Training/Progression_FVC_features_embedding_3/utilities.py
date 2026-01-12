@@ -18,11 +18,61 @@ import timm
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.optim as optim
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score, mean_absolute_error, mean_squared_error, r2_score
 from torch.utils.data import DataLoader
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
 from sklearn.metrics import roc_curve
+
+
+# =============================================================================
+# FVC NORMALIZER - For consistent normalization across train/val/test
+# =============================================================================
+class FVCNormalizer:
+    """Normalize and denormalize FVC values consistently"""
+    def __init__(self):
+        self.mean = None
+        self.std = None
+    
+    def fit(self, fvc_values):
+        """Fit on training set"""
+        self.mean = float(np.mean(fvc_values))
+        self.std = float(np.std(fvc_values))
+        if self.std < 1e-6:
+            self.std = 1.0
+        print(f"FVCNormalizer fitted - Mean: {self.mean:.2f} mL, Std: {self.std:.2f} mL")
+    
+    def transform(self, fvc_values):
+        """Normalize FVC values"""
+        if self.mean is None or self.std is None:
+            raise ValueError("Normalizer not fitted. Call fit() first.")
+        return (fvc_values - self.mean) / self.std
+    
+    def inverse_transform(self, fvc_normalized):
+        """Denormalize FVC values"""
+        if self.mean is None or self.std is None:
+            raise ValueError("Normalizer not fitted. Call fit() first.")
+        return fvc_normalized * self.std + self.mean
+    
+    def get_stats(self):
+        """Return normalization stats as dict"""
+        return {'mean': self.mean, 'std': self.std}
+
+
+# =============================================================================
+# COMBINED LOSS FUNCTION - MAE + MSE for robust regression
+# =============================================================================
+class CombinedRegressionLoss(nn.Module):
+    """Combined MAE + MSE loss for robust regression"""
+    def __init__(self, alpha=0.7):
+        super().__init__()
+        self.alpha = alpha  # Weight for MSE (1-alpha for MAE)
+        self.mse = nn.MSELoss()
+        self.mae = nn.L1Loss()
+    
+    def forward(self, pred, target):
+        return self.alpha * self.mse(pred, target) + (1 - self.alpha) * self.mae(pred, target)
+
 
 HAND_FEATURE_ORDER = [
     'approx_vol',
@@ -36,7 +86,8 @@ HAND_FEATURE_ORDER = [
     'kurtosis',
     'age',
     'sex',
-    'smoking_status'
+    'smoking_status',
+    'fvc_baseline'  # ⭐ CRITICAL: Add baseline FVC as 13th feature
 ]
 
 NORMALIZE_FEATURES = [
@@ -49,7 +100,8 @@ NORMALIZE_FEATURES = [
     'mean',
     'skew',
     'kurtosis',
-    'age'
+    'age',
+    'fvc_baseline'  # ⭐ CRITICAL: Normalize baseline FVC too
 ]
 class FusionMLPOptuna(nn.Module):
     """Flexible MLP architecture for Optuna optimization"""
@@ -496,7 +548,7 @@ def train_with_best_params(best_params, train_loader, val_loader, test_loader, d
             print(f"Epoch {epoch+1}/{max_epochs} - Train AUC: {train_auc:.4f}, Val AUC: {val_auc:.4f}")
     
     # Test evaluation
-    checkpoint = torch.load('final_best_model.pth')
+    checkpoint = torch.load('final_best_model.pth', weights_only=False)
     model.load_state_dict(checkpoint['model'])
     model.eval()
     
@@ -763,7 +815,8 @@ class PatientMLPDataset(Dataset):
         embeddings_dict,
         handcrafted_dict,
         patient_list,
-        feature_stats = None
+        feature_stats = None,
+        fvc_norm_stats = None
     ):
         """
         Args:
@@ -771,6 +824,8 @@ class PatientMLPDataset(Dataset):
             embeddings_dict: Dictionary of patient embeddings from CNN
             handcrafted_dict: Dictionary of handcrafted features
             patient_list: List of patient IDs to include
+            feature_stats: Stats for handcrafted features normalization
+            fvc_norm_stats: Dict with 'mean' and 'std' for FVC normalization (optional)
         """
         self.df = pd.read_csv(label_csv)
         self.df = self.df[self.df['Patient'].isin(patient_list)].reset_index(drop=True)
@@ -790,6 +845,7 @@ class PatientMLPDataset(Dataset):
             print(f"⚠️  Warning: Only {len(self.df)}/{len(patient_list)} patients have complete data")
 
         self.feature_stats = feature_stats
+        self.fvc_norm_stats = fvc_norm_stats or {'mean': 0, 'std': 1}  # Default: no normalization
 
     def __len__(self):
         return len(self.df)
@@ -813,7 +869,11 @@ class PatientMLPDataset(Dataset):
                 
         x_img = torch.FloatTensor(self.embeddings[pid])
         x_hand = torch.FloatTensor(norm_feats)
-        y = torch.FloatTensor([row['fvc_52']])
+        
+        # Normalize FVC target
+        fvc_raw = row['fvc_52']
+        fvc_norm = (fvc_raw - self.fvc_norm_stats['mean']) / self.fvc_norm_stats['std']
+        y = torch.FloatTensor([fvc_norm])
 
         return {
             'x_img': x_img,
@@ -923,7 +983,7 @@ class FusionMLP(nn.Module):
 
 
 
-def train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
+def train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5, scheduler=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -950,9 +1010,13 @@ def train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
 
         optimizer.step()
         
+        # OneCycleLR scheduler step (at each batch)
+        if scheduler is not None:
+            scheduler.step()
+        
         # Track metrics
         total_loss += loss.item()
-        preds = torch.sigmoid(logits).detach().cpu().numpy()
+        preds = logits.detach().cpu().numpy()
         labels = y.detach().cpu().numpy()
         
         all_preds.extend(preds.flatten())
@@ -961,9 +1025,9 @@ def train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
         pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     avg_loss = total_loss / len(loader)
-    auc = roc_auc_score(all_labels, all_preds)
+    mae = mean_absolute_error(all_labels, all_preds)
     
-    return avg_loss, auc
+    return avg_loss, mae
 
 
 def validate(model, loader, criterion, device):
@@ -986,7 +1050,7 @@ def validate(model, loader, criterion, device):
             
             # Track metrics
             total_loss += loss.item()
-            preds = torch.sigmoid(logits).cpu().numpy()
+            preds = logits.cpu().numpy()
             labels = y.cpu().numpy()
             
             all_preds.extend(preds.flatten())
@@ -994,123 +1058,416 @@ def validate(model, loader, criterion, device):
             all_pids.extend(batch['patient_id'])
     
     avg_loss = total_loss / len(loader)
-    auc = roc_auc_score(all_labels, all_preds)
-    
-    # Find optimal threshold using Youden's J statistic
-    from sklearn.metrics import roc_curve
-    fpr, tpr, thresholds = roc_curve(all_labels, all_preds)
-    j_scores = tpr - fpr
-    optimal_idx = np.argmax(j_scores)
-    optimal_threshold = thresholds[optimal_idx]
-    
-    # Binary predictions at optimal threshold
-    binary_preds = (np.array(all_preds) >= optimal_threshold).astype(int)
-    acc = accuracy_score(all_labels, binary_preds)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        all_labels, binary_preds, average='binary', zero_division=0
-    )
-    
+    mae = mean_absolute_error(all_labels, all_preds)
+    rmse = np.sqrt(mean_squared_error(all_labels, all_preds))
+    r2 = r2_score(all_labels, all_preds)
+
     metrics = {
         'loss': avg_loss,
-        'auc': auc,
-        'accuracy': acc,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'optimal_threshold': optimal_threshold
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
     }
     
     return metrics, all_preds, all_labels, all_pids
 
 
-def train_model(model, train_loader, val_loader, epochs=50, lr=1.7345566642360933e-05, 
-                weight_decay=0.0002669866674274458, grad_clip=0.5, 
-                use_class_weights=True, device='cuda'):
-    """Complete training loop"""
-
-    if use_class_weights:
-        all_labels =[]
-        for batch in train_loader:
-            all_labels.extend(batch['y'].numpy())
-        all_labels = np.array(all_labels)
-
-        #Calculate weights
-        n_samples = len(all_labels)
-        n_pos = all_labels.sum()
-        n_neg = n_samples - n_pos
-
-        pos_weight = torch.tensor([n_neg / n_pos], device=device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        print(f"Using class weights: pos_weight={pos_weight.item():.4f}")
-    else:
-        criterion = nn.BCEWithLogitsLoss()
+def print_top_errors(preds, labels, pids, n=5, title="Top Prediction Errors"):
+    """Print top N worst predictions"""
     
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # More conservative scheduler to prevent LR collapse
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-7
-    )
-    patience = 10
-    no_improve_count = 0
-    best_auc = 0
-    best_epoch = 0
-    history = {
-        'train_loss': [], 'train_auc': [],
-        'val_loss': [], 'val_auc': []
+    errors = np.abs(np.array(labels) - np.array(preds))
+    # Use MAPE (Mean Absolute Percentage Error) to avoid extreme % when actual is very small
+    # percent_error = error / ((actual + predicted) / 2) * 100
+    mean_values = (np.array(labels) + np.array(preds)) / 2.0
+    percent_errors = (errors / mean_values) * 100
+    
+    # Sort by error (absolute error magnitude)
+    indices = np.argsort(errors)[::-1]  # Descending
+    
+    print(f"\n{title}:")
+    print("-" * 90)
+    print(f"{'Patient ID':<35} {'Actual':<12} {'Predicted':<12} {'Error':<12} {'% Error':<10}")
+    print("-" * 90)
+    
+    for i in range(min(n, len(pids))):
+        idx = indices[i]
+        print(f"{pids[idx]:<35} {labels[idx]:<12.1f} {preds[idx]:<12.1f} {errors[idx]:<12.1f} {percent_errors[idx]:<10.2f}%")
+    
+    print("-" * 90)
+
+
+def train_kfold(
+    model_class,
+    patient_ids,
+    label_csv,
+    embeddings_dict,
+    handcrafted_dict,
+    feature_stats,
+    n_splits=5,
+    epochs=100,
+    lr=1e-4,
+    weight_decay=5e-2,
+    grad_clip=1.0,
+    device='cuda'
+):
+    """K-Fold Cross-Validation for model training
+    
+    Args:
+        model_class: Model class (e.g., SimpleFusionMLP)
+        patient_ids: List of patient IDs to use for k-fold
+        label_csv: Path to CSV with labels
+        embeddings_dict: Dictionary of patient embeddings
+        handcrafted_dict: Dictionary of handcrafted features
+        feature_stats: Feature normalization statistics
+        n_splits: Number of folds
+        epochs: Number of training epochs per fold
+        ... other training hyperparameters
+    
+    Returns:
+        Dictionary with metrics for each fold and overall statistics
+    """
+    from sklearn.model_selection import KFold
+    import os
+    
+    print("\n" + "="*80)
+    print(f"K-FOLD CROSS-VALIDATION ({n_splits} Folds)")
+    print("="*80)
+    
+    # Compute FVC normalization stats from all patients (not just train)
+    label_df = pd.read_csv(label_csv)
+    all_fvc_values = label_df[label_df['Patient'].isin(patient_ids)]['fvc_52'].values
+    
+    fvc_mean = float(np.mean(all_fvc_values))
+    fvc_std = float(np.std(all_fvc_values))
+    if fvc_std < 1e-6:
+        fvc_std = 1.0
+    
+    fvc_norm_stats = {'mean': fvc_mean, 'std': fvc_std}
+    
+    print(f"✓ FVC Stats (from {len(all_fvc_values)} patients):")
+    print(f"  Mean: {fvc_mean:.2f} mL, Std: {fvc_std:.2f} mL")
+    
+    # Initialize KFold
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    # Store results
+    fold_results = []
+    all_predictions = {
+        'patient_id': [],
+        'fold': [],
+        'true_fvc': [],
+        'pred_fvc': [],
+        'error': [],
+        'error_percent': []
     }
+    
+    # K-Fold Loop
+    for fold, (train_idx, val_idx) in enumerate(kf.split(patient_ids)):
+        print(f"\n{'='*80}")
+        print(f"FOLD {fold+1}/{n_splits}")
+        print(f"{'='*80}")
+        
+        fold_train_ids = [patient_ids[i] for i in train_idx]
+        fold_val_ids = [patient_ids[i] for i in val_idx]
+        
+        print(f"Train: {len(fold_train_ids)} patients | Val: {len(fold_val_ids)} patients")
+        
+        # Create datasets
+        train_ds = PatientMLPDataset(
+            label_csv=label_csv,
+            embeddings_dict=embeddings_dict,
+            handcrafted_dict=handcrafted_dict,
+            patient_list=fold_train_ids,
+            feature_stats=feature_stats,
+            fvc_norm_stats=fvc_norm_stats
+        )
+        
+        val_ds = PatientMLPDataset(
+            label_csv=label_csv,
+            embeddings_dict=embeddings_dict,
+            handcrafted_dict=handcrafted_dict,
+            patient_list=fold_val_ids,
+            feature_stats=feature_stats,
+            fvc_norm_stats=fvc_norm_stats
+        )
+        
+        # Create dataloaders
+        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=4)
+        val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=4)
+        
+        # Initialize model for this fold
+        model = model_class(
+            img_dim=320,
+            hand_dim=13,
+            hidden=32,
+            dropout=0.5
+        ).to(device)
+        
+        # Train model
+        history = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=epochs,
+            lr=lr,
+            weight_decay=weight_decay,
+            grad_clip=grad_clip,
+            use_class_weights=False,
+            device=device,
+            fvc_norm_stats=fvc_norm_stats
+        )
+        
+        # Load best model for this fold
+        model.load_state_dict(torch.load('best_fusion_mlp.pth', weights_only=False))
+        
+        # Evaluate on validation set
+        criterion = CombinedRegressionLoss(alpha=0.7)
+        val_metrics, val_preds, val_labels, val_pids = validate(
+            model, val_loader, criterion, device
+        )
+        
+        # Denormalize
+        val_preds_denorm = np.array(val_preds) * fvc_std + fvc_mean
+        val_labels_denorm = np.array(val_labels) * fvc_std + fvc_mean
+        
+        # Compute metrics
+        val_mae_denorm = mean_absolute_error(val_labels_denorm, val_preds_denorm)
+        val_rmse_denorm = np.sqrt(mean_squared_error(val_labels_denorm, val_preds_denorm))
+        val_r2_denorm = r2_score(val_labels_denorm, val_preds_denorm)
+        
+        fold_result = {
+            'fold': fold + 1,
+            'mae': val_mae_denorm,
+            'rmse': val_rmse_denorm,
+            'r2': val_r2_denorm
+        }
+        fold_results.append(fold_result)
+        
+        print(f"\n✓ Fold {fold+1} Results:")
+        print(f"  MAE: {val_mae_denorm:.2f} mL")
+        print(f"  RMSE: {val_rmse_denorm:.2f} mL")
+        print(f"  R²: {val_r2_denorm:.4f}")
+        
+        # Store predictions
+        for pid, true_val, pred_val in zip(val_pids, val_labels_denorm, val_preds_denorm):
+            all_predictions['patient_id'].append(pid)
+            all_predictions['fold'].append(fold + 1)
+            all_predictions['true_fvc'].append(true_val)
+            all_predictions['pred_fvc'].append(pred_val)
+            all_predictions['error'].append(true_val - pred_val)
+            all_predictions['error_percent'].append(((true_val - pred_val) / true_val) * 100 if true_val != 0 else 0)
+        
+        # Clean up checkpoint
+        if os.path.exists('best_fusion_mlp.pth'):
+            os.remove('best_fusion_mlp.pth')
+    
+    # Aggregate results
+    print(f"\n{'='*80}")
+    print("K-FOLD CROSS-VALIDATION SUMMARY")
+    print(f"{'='*80}")
+    
+    mae_scores = [r['mae'] for r in fold_results]
+    rmse_scores = [r['rmse'] for r in fold_results]
+    r2_scores = [r['r2'] for r in fold_results]
+    
+    print(f"\n📊 MAE:  {np.mean(mae_scores):.2f} ± {np.std(mae_scores):.2f} mL")
+    print(f"📊 RMSE: {np.mean(rmse_scores):.2f} ± {np.std(rmse_scores):.2f} mL")
+    print(f"📊 R²:   {np.mean(r2_scores):.4f} ± {np.std(r2_scores):.4f}")
+    
+    # Save predictions to CSV
+    predictions_df = pd.DataFrame(all_predictions)
+    predictions_df.to_csv('kfold_predictions.csv', index=False)
+    print(f"\n✅ K-Fold predictions saved to 'kfold_predictions.csv'")
+    
+    # Save fold results
+    fold_results_df = pd.DataFrame(fold_results)
+    fold_results_df.to_csv('kfold_results.csv', index=False)
+    print(f"✅ Fold results saved to 'kfold_results.csv'")
+    
+    return {
+        'fold_results': fold_results,
+        'all_predictions': predictions_df,
+        'mean_mae': np.mean(mae_scores),
+        'std_mae': np.std(mae_scores),
+        'mean_rmse': np.mean(rmse_scores),
+        'std_rmse': np.std(rmse_scores),
+        'mean_r2': np.mean(r2_scores),
+        'std_r2': np.std(r2_scores),
+        'fvc_norm_stats': fvc_norm_stats
+    }
+
+
+def train_model(model, train_loader, val_loader, epochs=100, lr=1.7345566642360933e-05, 
+                weight_decay=0.0002669866674274458, grad_clip=0.5, 
+                use_class_weights=False, device='cuda', fvc_norm_stats=None):
+    """Complete training loop with checkpoint support
+    
+    Args:
+        fvc_norm_stats: dict with 'mean' and 'std' for FVC denormalization. 
+                       If provided, uses these to denormalize predictions for display.
+                       Dataset already normalizes targets, so these are just for display.
+    """
+    import os
+
+    # Use provided FVC stats (computed on full training set, applied by dataset)
+    if fvc_norm_stats is None:
+        print("\n⚠️  WARNING: fvc_norm_stats not provided. Predictions will be displayed in normalized space.")
+        fvc_norm_stats = {'mean': 0, 'std': 1}
+    else:
+        print("\n" + "="*80)
+        print("FVC NORMALIZATION STATISTICS (from Main Script)")
+        print("="*80)
+        print(f"✓ FVC Mean: {fvc_norm_stats['mean']:.2f} mL")
+        print(f"✓ FVC Std: {fvc_norm_stats['std']:.2f} mL")
+        print("="*80 + "\n")
+    
+    fvc_mean = fvc_norm_stats['mean']
+    fvc_std = fvc_norm_stats['std']
+
+    # Regression task - use combined loss (MAE + MSE) for robustness
+    criterion = CombinedRegressionLoss(alpha=0.7)  # 70% MSE, 30% MAE
+    
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # Use OneCycleLR for faster convergence
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr * 10,  # Peak learning rate
+        epochs=epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.3,  # 30% for warm-up
+        anneal_strategy='cos',
+        div_factor=25.0,
+        final_div_factor=10000.0
+    )
+    
+    patience = 15  # Slightly increased for OneCycleLR
+    no_improve_count = 0
+    best_mae = float('inf')
+    best_epoch = 0
+    start_epoch = 0
+    history = {
+        'train_loss': [], 'train_mae': [],
+        'val_loss': [], 'val_mae': [], 'val_rmse': [], 'val_r2': []
+    }
+    
+    # =========================================================================
+    # CHECKPOINT MANAGEMENT
+    # =========================================================================
+    checkpoint_path = 'training_checkpoint.pt'
+    best_model_path = 'best_fusion_mlp.pth'
+    
+    # Try to load checkpoint
+    if os.path.exists(checkpoint_path):
+        print("\n" + "="*80)
+        print("LOADING CHECKPOINT")
+        print("="*80)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        scheduler.load_state_dict(checkpoint['scheduler_state'])
+        start_epoch = checkpoint['epoch']
+        best_mae = checkpoint['best_mae']
+        best_epoch = checkpoint['best_epoch']
+        no_improve_count = checkpoint['no_improve_count']
+        history = checkpoint['history']
+        
+        print(f"✓ Checkpoint loaded from epoch {start_epoch}")
+        print(f"✓ Best MAE so far: {best_mae:.4f} (at epoch {best_epoch})")
+        print("="*80 + "\n")
+    else:
+        print("\n" + "="*80)
+        print("NO CHECKPOINT FOUND - STARTING FRESH")
+        print("="*80 + "\n")
     
     print("\n" + "="*80)
     print("TRAINING STARTED")
     print("="*80)
     
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
         print("-" * 80)
         
-        # Train
-        train_loss, train_auc = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip)
+        # Train (with OneCycleLR scheduler step inside)
+        train_loss, train_mae = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip, scheduler)
         
         # Validate
-        val_metrics, _, _, _ = validate(model, val_loader, criterion, device)
+        val_metrics, val_preds, val_labels, val_pids = validate(model, val_loader, criterion, device)
         
-        # Update scheduler
-        scheduler.step(val_metrics['auc'])
+        # Denormalize predictions for display (normalized values -> original FVC values)
+        val_preds_denorm = np.array(val_preds) * fvc_std + fvc_mean
+        val_labels_denorm = np.array(val_labels) * fvc_std + fvc_mean
+        
+        # OneCycleLR scheduler step - already called in train_epoch (at each batch)
+        # No need to call scheduler.step() here
         current_lr = optimizer.param_groups[0]['lr']
         
         # Save history
         history['train_loss'].append(train_loss)
-        history['train_auc'].append(train_auc)
+        history['train_mae'].append(train_mae)
         history['val_loss'].append(val_metrics['loss'])
-        history['val_auc'].append(val_metrics['auc'])
+        history['val_mae'].append(val_metrics['mae'])
+        history['val_rmse'].append(val_metrics['rmse'])
+        history['val_r2'].append(val_metrics['r2'])
+        
+        # Denormalize metrics for display
+        val_mae_denorm = val_metrics['mae'] * fvc_std
+        val_rmse_denorm = val_metrics['rmse'] * fvc_std
+        train_mae_denorm = train_mae * fvc_std
         
         # Print metrics
-        print(f"\nTrain Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f}")
-        print(f"Val Loss: {val_metrics['loss']:.4f} | Val AUC: {val_metrics['auc']:.4f}")
-        print(f"Val Acc: {val_metrics['accuracy']:.4f} | Val F1: {val_metrics['f1']:.4f}")
+        print(f"\nTrain Loss: {train_loss:.4f} | Train MAE: {train_mae_denorm:.2f} mL [norm: {train_mae:.4f}]")
+        print(f"Val Loss: {val_metrics['loss']:.4f} | Val MAE: {val_mae_denorm:.2f} mL [norm: {val_metrics['mae']:.4f}]")
+        print(f"Val RMSE: {val_rmse_denorm:.2f} mL [norm: {val_metrics['rmse']:.4f}] | Val R²: {val_metrics['r2']:.4f}")
         print(f"Learning Rate: {current_lr:.6e}")
-        print(f"Optimal Threshold: {val_metrics['optimal_threshold']:.4f}")
+        
+        # Print top 3 worst predictions
+        print_top_errors(val_preds_denorm, val_labels_denorm, val_pids, n=3, 
+                        title=f"Epoch {epoch+1} - Top 3 Worst Predictions (Val Set) [DENORMALIZED]")
         
         # Save best model
-        if val_metrics['auc'] > best_auc:
-            best_auc = val_metrics['auc']
+        if val_metrics['mae'] < best_mae:
+            best_mae = val_metrics['mae']
+            best_mae_denorm = val_mae_denorm
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), 'best_fusion_mlp.pth')
-            print(f"New best model saved! (AUC: {best_auc:.4f})")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"✓ New best model saved! (MAE: {best_mae_denorm:.2f} mL [norm: {best_mae:.4f}])")
         else:
             no_improve_count += 1
+        
+        # Save checkpoint every epoch for resuming
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict(),
+            'best_mae': best_mae,
+            'best_epoch': best_epoch,
+            'no_improve_count': no_improve_count,
+            'history': history,
+            'fvc_norm_stats': fvc_norm_stats
+        }
+        torch.save(checkpoint, checkpoint_path)
         
         if no_improve_count >= patience:
             print("Early stopping triggered.")
             break
     
     print("\n" + "="*80)
-    print(f"TRAINING COMPLETED - Best AUC: {best_auc:.4f} at epoch {best_epoch}")
+    print(f"TRAINING COMPLETED - Best MAE: {best_mae_denorm:.2f} mL [norm: {best_mae:.4f}] at epoch {best_epoch}")
     print("="*80)
+    print(f"\n📁 Checkpoint saved: {checkpoint_path}")
+    print(f"📁 Best model saved: {best_model_path}")
+    
+    # Clean up checkpoint after successful training
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f"✓ Checkpoint removed after successful completion")
     
     return history
 
 def plot_training_history(history, save_path='training_history.png'):
-    """Plot training history with loss and metrics"""
+    """Plot training history for regression task (MAE, RMSE, R²)"""
     import matplotlib.pyplot as plt
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -1120,47 +1477,56 @@ def plot_training_history(history, save_path='training_history.png'):
     axes[0, 0].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
     axes[0, 0].plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
     axes[0, 0].set_xlabel('Epoch', fontsize=12)
-    axes[0, 0].set_ylabel('Loss', fontsize=12)
+    axes[0, 0].set_ylabel('MSE Loss', fontsize=12)
     axes[0, 0].set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
     axes[0, 0].legend(fontsize=10)
     axes[0, 0].grid(True, alpha=0.3)
     
-    # Plot 2: AUC
-    axes[0, 1].plot(epochs, history['train_auc'], 'b-', label='Train AUC', linewidth=2)
-    axes[0, 1].plot(epochs, history['val_auc'], 'r-', label='Val AUC', linewidth=2)
+    # Plot 2: MAE (Mean Absolute Error)
+    axes[0, 1].plot(epochs, history['train_mae'], 'b-', label='Train MAE', linewidth=2)
+    axes[0, 1].plot(epochs, history['val_mae'], 'r-', label='Val MAE', linewidth=2)
     axes[0, 1].set_xlabel('Epoch', fontsize=12)
-    axes[0, 1].set_ylabel('AUC', fontsize=12)
-    axes[0, 1].set_title('Training and Validation AUC', fontsize=14, fontweight='bold')
+    axes[0, 1].set_ylabel('MAE (mL)', fontsize=12)
+    axes[0, 1].set_title('Training and Validation MAE', fontsize=14, fontweight='bold')
     axes[0, 1].legend(fontsize=10)
     axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].set_ylim([0, 1])
     
-    # Plot 3: Overfitting Gap (Train - Val)
-    auc_gap = [t - v for t, v in zip(history['train_auc'], history['val_auc'])]
-    axes[1, 0].plot(epochs, auc_gap, 'g-', linewidth=2)
-    axes[1, 0].axhline(y=0, color='k', linestyle='--', alpha=0.3)
-    axes[1, 0].set_xlabel('Epoch', fontsize=12)
-    axes[1, 0].set_ylabel('AUC Gap (Train - Val)', fontsize=12)
-    axes[1, 0].set_title('Overfitting Monitor', fontsize=14, fontweight='bold')
+    # Plot 3: RMSE vs R²
+    ax3_1 = axes[1, 0]
+    ax3_2 = ax3_1.twinx()
+    
+    line1 = ax3_1.plot(epochs, history['val_rmse'], 'g-', label='Val RMSE', linewidth=2)
+    line2 = ax3_2.plot(epochs, history['val_r2'], 'purple', label='Val R²', linewidth=2)
+    
+    ax3_1.set_xlabel('Epoch', fontsize=12)
+    ax3_1.set_ylabel('RMSE (mL)', fontsize=12, color='g')
+    ax3_2.set_ylabel('R² Score', fontsize=12, color='purple')
+    ax3_1.tick_params(axis='y', labelcolor='g')
+    ax3_2.tick_params(axis='y', labelcolor='purple')
+    axes[1, 0].set_title('Validation RMSE and R²', fontsize=14, fontweight='bold')
+    
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax3_1.legend(lines, labels, loc='upper left', fontsize=10)
     axes[1, 0].grid(True, alpha=0.3)
-    axes[1, 0].fill_between(epochs, 0, auc_gap, alpha=0.3, color='green')
     
-    # Plot 4: Loss comparison
-    axes[1, 1].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2, alpha=0.7)
-    axes[1, 1].plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2, alpha=0.7)
+    # Plot 4: MAE Overfitting Gap
+    mae_gap = [t - v for t, v in zip(history['train_mae'], history['val_mae'])]
+    axes[1, 1].plot(epochs, mae_gap, 'orange', linewidth=2)
+    axes[1, 1].axhline(y=0, color='k', linestyle='--', alpha=0.3)
+    axes[1, 1].set_xlabel('Epoch', fontsize=12)
+    axes[1, 1].set_ylabel('MAE Gap (Train - Val)', fontsize=12)
+    axes[1, 1].set_title('Overfitting Monitor (MAE)', fontsize=14, fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].fill_between(epochs, 0, mae_gap, alpha=0.3, color='orange')
     
-    # Add best epoch marker
-    best_epoch_idx = np.argmax(history['val_auc'])
+    # Add best epoch marker based on Val MAE
+    best_epoch_idx = np.argmin(history['val_mae'])
     axes[1, 1].axvline(x=best_epoch_idx + 1, color='gold', linestyle='--', 
                        linewidth=2, label=f'Best Epoch ({best_epoch_idx + 1})')
-    axes[1, 1].scatter([best_epoch_idx + 1], [history['val_loss'][best_epoch_idx]], 
+    axes[1, 1].scatter([best_epoch_idx + 1], [mae_gap[best_epoch_idx]], 
                        color='red', s=100, zorder=5, marker='*')
-    
-    axes[1, 1].set_xlabel('Epoch', fontsize=12)
-    axes[1, 1].set_ylabel('Loss', fontsize=12)
-    axes[1, 1].set_title('Loss with Best Epoch Marker', fontsize=14, fontweight='bold')
     axes[1, 1].legend(fontsize=10)
-    axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -1168,6 +1534,7 @@ def plot_training_history(history, save_path='training_history.png'):
     plt.show()
     
     return fig
+
 
 
 def plot_roc_curve(labels, predictions, save_path='roc_curve.png'):

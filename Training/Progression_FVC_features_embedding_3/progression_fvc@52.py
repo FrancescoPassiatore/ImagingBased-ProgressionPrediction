@@ -29,7 +29,8 @@ HAND_FEATURE_ORDER = [
     'kurtosis',
     'age',
     'sex',
-    'smoking_status'
+    'smoking_status',
+    'fvc_baseline'  # ⭐ CRITICAL: Add baseline FVC as 13th feature
 ]
 
 NORMALIZE_FEATURES = [
@@ -42,7 +43,8 @@ NORMALIZE_FEATURES = [
     'mean',
     'skew',
     'kurtosis',
-    'age'
+    'age',
+    'fvc_baseline'  # ⭐ CRITICAL: Normalize baseline FVC too
 ]
 
 
@@ -71,7 +73,7 @@ if __name__ == "__main__":
     # PATHS AND HYPERPARAMETERS
     # =============================================================================
     CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
-    CSV_PATH_LABEL_52 = 'Training/Progression_prediction_risk/data/patient_progression_52w.csv'
+    CSV_PATH_LABEL_52 = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_risk_2\data\patient_progression_52w.csv'
     CSV_FEATURES_PATH = 'Training/CNN_Slope_Prediction/patient_features.csv'
     NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
 
@@ -93,9 +95,9 @@ if __name__ == "__main__":
     print("[3/10] LOADING TRAIN/VAL/TEST SPLITS")
     print("="*80)
 
-    train_ids = pd.read_csv("Training/Progression_prediction_risk/data/train_patients_52w.csv")['Patient'].tolist()
-    val_ids   = pd.read_csv("Training/Progression_prediction_risk/data/val_patients_52w.csv")['Patient'].tolist()
-    test_ids  = pd.read_csv("Training/Progression_prediction_risk/data/test_patients_52w.csv")['Patient'].tolist()
+    train_ids = pd.read_csv("Training/Progression_prediction_risk_2/data/train_patients_52w.csv")['Patient'].tolist()
+    val_ids   = pd.read_csv("Training/Progression_prediction_risk_2/data/val_patients_52w.csv")['Patient'].tolist()
+    test_ids  = pd.read_csv("Training/Progression_prediction_risk_2/data/test_patients_52w.csv")['Patient'].tolist()
 
     print(f"✓ Train patients: {len(train_ids)}")
     print(f"✓ Val patients: {len(val_ids)}")
@@ -127,7 +129,36 @@ if __name__ == "__main__":
     for key, value in features_data[sample_patient].items():
         print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
 
+    # =============================================================================
+    # LOAD FVC BASELINE (CRITICAL FEATURE!)
+    # =============================================================================
+    print("\n" + "="*80)
+    print("LOADING FVC BASELINE FROM TRAIN.CSV")
+    print("="*80)
     
+    # Load train.csv to get baseline FVC
+    train_csv_path = 'Training/CNN_Slope_Prediction/train.csv'
+    train_df = pd.read_csv(train_csv_path)
+    
+    # Get baseline FVC (earliest measurement) for each patient
+    baseline_fvc = {}
+    for patient_id in patient_data.keys():
+        patient_weeks = train_df[train_df['Patient'] == patient_id]['Weeks'].values
+        if len(patient_weeks) > 0:
+            earliest_week_idx = np.argmin(patient_weeks)
+            baseline_fvc_val = train_df[train_df['Patient'] == patient_id].iloc[earliest_week_idx]['FVC']
+            baseline_fvc[patient_id] = baseline_fvc_val
+        else:
+            baseline_fvc[patient_id] = 0.0  # Fallback
+    
+    print(f"✓ Loaded baseline FVC for {len(baseline_fvc)} patients")
+    print(f"  Baseline FVC range: {np.min(list(baseline_fvc.values())):.0f} - {np.max(list(baseline_fvc.values())):.0f} mL")
+    
+    # Add baseline FVC to features_data
+    for patient_id in features_data.keys():
+        features_data[patient_id]['fvc_baseline'] = baseline_fvc.get(patient_id, 0.0)
+    
+    print("✓ Added fvc_baseline to all patient features")
 
     # =============================================================================
     # STEP 4: EXTRACT FEATURES FROM SLICES
@@ -186,6 +217,31 @@ if __name__ == "__main__":
     for k, v in feature_stats.items():
         print(f"   {k}: mean={v['mean']:.3f}, std={v['std']:.3f}")
 
+    # Compute FVC normalization stats from TRAINING SET ONLY
+    print("\n" + "="*80)
+    print("[FVC Stats] COMPUTING FVC NORMALIZATION STATS (TRAIN ONLY)")
+    print("="*80)
+    
+    label_df = pd.read_csv(CSV_PATH_LABEL_52)
+    
+    # Get FVC values only from training patients
+    train_fvc_values = label_df[label_df['Patient'].isin(train_ids)]['fvc_52'].values
+    
+    fvc_mean = float(np.mean(train_fvc_values))
+    fvc_std = float(np.std(train_fvc_values))
+    
+    # Handle edge case
+    if fvc_std < 1e-6:
+        fvc_std = 1.0
+    
+    fvc_norm_stats = {'mean': fvc_mean, 'std': fvc_std}
+    
+    print(f"✓ FVC Statistics (from {len(train_fvc_values)} TRAIN patients):")
+    print(f"  Mean: {fvc_mean:.2f} mL")
+    print(f"  Std: {fvc_std:.2f} mL")
+    print(f"  Range: {train_fvc_values.min():.2f} - {train_fvc_values.max():.2f} mL")
+    print("="*80)
+
     # =============================================================================
     # STEP 5: CREATE MLP DATASETS
     # =============================================================================
@@ -198,7 +254,8 @@ if __name__ == "__main__":
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
         patient_list=train_ids,
-        feature_stats=feature_stats
+        feature_stats=feature_stats,
+        fvc_norm_stats=fvc_norm_stats
     )
     
     val_ds = PatientMLPDataset(
@@ -206,7 +263,8 @@ if __name__ == "__main__":
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
         patient_list=val_ids,
-        feature_stats=feature_stats
+        feature_stats=feature_stats,
+        fvc_norm_stats=fvc_norm_stats
     )
     
     test_ds = PatientMLPDataset(
@@ -214,7 +272,8 @@ if __name__ == "__main__":
         embeddings_dict=patient_embeddings,
         handcrafted_dict=features_data,
         patient_list=test_ids,
-        feature_stats=feature_stats
+        feature_stats=feature_stats,
+        fvc_norm_stats=fvc_norm_stats
     )
     
     print(f"✓ Train dataset: {len(train_ds)} patients")
@@ -267,9 +326,9 @@ if __name__ == "__main__":
 
     model = SimpleFusionMLP(
         img_dim=320,
-        hand_dim=12,
+        hand_dim=13,  # 12 original + 1 (fvc_baseline) ⭐
         hidden=32,       
-        dropout=0.6         
+        dropout=0.5         
     ).to('cuda')
     
     print(f"\n✓ Model initialized with {sum(p.numel() for p in model.parameters())} parameters")
@@ -279,12 +338,13 @@ if __name__ == "__main__":
         model=model,
         train_loader=train_loader,  # Your train DataLoader with batch_size=32
         val_loader=val_loader,      # Your validation DataLoader
-        epochs=50,
+        epochs=100,
         lr=1e-4,
-        weight_decay=1e-2,
+        weight_decay=5e-2,
         grad_clip=1.0,
-        use_class_weights=True,
-        device='cuda'
+        use_class_weights=False,
+        device='cuda',
+        fvc_norm_stats=fvc_norm_stats  # Pass the computed FVC normalization stats
     )
 
     
@@ -303,32 +363,48 @@ if __name__ == "__main__":
     # Load best model
     model.load_state_dict(torch.load('best_fusion_mlp.pth'))
     
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = CombinedRegressionLoss(alpha=0.7)
     test_metrics, test_preds, test_labels, test_pids = validate(
         model, test_loader, criterion, device
     )
 
+    # Denormalize test predictions
+    test_preds_denorm = np.array(test_preds) * fvc_norm_stats['std'] + fvc_norm_stats['mean']
+    test_labels_denorm = np.array(test_labels) * fvc_norm_stats['std'] + fvc_norm_stats['mean']
     
-    # Valuta sul test set
-    test_metrics, test_preds, test_labels, _ = validate(model, test_loader, criterion, device)
+    # Compute denormalized metrics
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    test_mae_denorm = mean_absolute_error(test_labels_denorm, test_preds_denorm)
+    test_rmse_denorm = np.sqrt(mean_squared_error(test_labels_denorm, test_preds_denorm))
+    test_r2_denorm = r2_score(test_labels_denorm, test_preds_denorm)
 
-    # Plotta la ROC curve
-    plot_roc_curve(test_labels, test_preds, save_path='roc_curve.png')
+    print(f"\n📊 Test Set Results [DENORMALIZED - in mL]:")
+    print(f"   MAE: {test_mae_denorm:.2f} mL")
+    print(f"   RMSE: {test_rmse_denorm:.2f} mL")
+    print(f"   R²: {test_r2_denorm:.4f}")
     
-    print(f"\n📊 Test Set Results:")
-    print(f"   AUC: {test_metrics['auc']:.4f}")
-    print(f"   Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"   Precision: {test_metrics['precision']:.4f}")
-    print(f"   Recall: {test_metrics['recall']:.4f}")
-    print(f"   F1 Score: {test_metrics['f1']:.4f}")
+    print(f"\n📊 Test Set Results [NORMALIZED - for reference]:")
+    print(f"   MAE: {test_metrics['mae']:.4f}")
+    print(f"   RMSE: {test_metrics['rmse']:.4f}")
+    print(f"   R²: {test_metrics['r2']:.4f}")
+    print(f"   Loss: {test_metrics['loss']:.4f}")
     
+    # Save results
     results_df = pd.DataFrame({
         'patient_id': test_pids,
-        'true_label': test_labels,
-        'predicted_prob': test_preds
+        'true_fvc_denorm': test_labels_denorm,
+        'pred_fvc_denorm': test_preds_denorm,
+        'true_fvc_norm': test_labels,
+        'pred_fvc_norm': test_preds,
+        'error_mL': test_labels_denorm - test_preds_denorm,
+        'error_percent': ((test_labels_denorm - test_preds_denorm) / test_labels_denorm) * 100
     })
     results_df.to_csv('test_predictions.csv', index=False)
     print("\n✅ Predictions saved to 'test_predictions.csv'")
+    
+    # Print top errors
+    print_top_errors(test_preds_denorm, test_labels_denorm, test_pids, n=5,
+                    title="Test Set - Top 5 Worst Predictions [DENORMALIZED]")
 
 
     
