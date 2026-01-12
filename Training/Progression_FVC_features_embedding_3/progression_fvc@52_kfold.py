@@ -28,8 +28,7 @@ HAND_FEATURE_ORDER = [
     'kurtosis',
     'age',
     'sex',
-    'smoking_status',
-    'fvc_baseline'
+    'smoking_status'
 ]
 
 NORMALIZE_FEATURES = [
@@ -42,8 +41,7 @@ NORMALIZE_FEATURES = [
     'mean',
     'skew',
     'kurtosis',
-    'age',
-    'fvc_baseline'
+    'age'
 ]
 
 
@@ -241,7 +239,7 @@ if __name__ == "__main__":
     # Train final model
     final_model = SimpleFusionMLP(
         img_dim=320,
-        hand_dim=13,
+        hand_dim=12,  # Changed from 13 (removed fvc_baseline)
         hidden=32,
         dropout=0.5
     ).to(device)
