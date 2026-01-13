@@ -36,8 +36,8 @@ print("-"*80)
 
 try:
     result = subprocess.run(
-        [sys.executable, r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\compare_two_models.py'],
-        cwd=r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training',
+        [sys.executable, r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Comparison_1_3\compare_two_models.py'],
+        cwd=r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Comparison_1_3',
         capture_output=False
     )
     

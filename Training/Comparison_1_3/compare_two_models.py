@@ -288,7 +288,7 @@ if __name__ == "__main__":
     
     # Model 2: FVC@52
     try:
-        fvc_df = pd.read_csv('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training\\Progression_FVC_features_embedding_3\\results\\test_predictions_final.csv')
+        fvc_df = pd.read_csv('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training\\Progression_FVC_features_embedding_3\\results\\test_predictions_final_2.csv')
         print(f"✓ Model 2 (FVC@52): {len(fvc_df)} predictions")
     except FileNotFoundError:
         print("❌ Error: 'test_predictions_final.csv' not found")
@@ -319,7 +319,9 @@ if __name__ == "__main__":
     print("\n[3/4] Computing true labels...")
     
     # Load patient data to get baseline FVC
-    from Training.Comparison_1_3.utilities import IPFDataLoader
+    import sys
+    sys.path.insert(0, 'Training/CNN_Slope_Prediction')
+    from utilities import IPFDataLoader
     
     CSV_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv'
     CSV_FEATURES_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv'
@@ -371,7 +373,7 @@ if __name__ == "__main__":
             continue
         
         y_true_list.append(y_true[pid])
-        y_pred_fold.append(fold_row.iloc[0]['is_progression'])
+        y_pred_fold.append(fold_row.iloc[0]['predicted_progression'])
         y_prob_fold.append(fold_row.iloc[0]['probability'])
     
     # Model 2: FVC@52
@@ -433,7 +435,7 @@ if __name__ == "__main__":
     print("SUMMARY TABLE")
     print("="*80)
     print(summary_df.to_string(index=False))
-    summary_df.to_csv('two_model_comparison.csv', index=False)
+    summary_df.to_csv('two_model_comparison_2.csv', index=False)
     print("\n✅ Summary saved to 'two_model_comparison.csv'")
     
     # Visualize
@@ -456,7 +458,7 @@ if __name__ == "__main__":
     
     plot_comparison('prediction_fold', models_data['prediction_fold'], 
                    'FVC@52', models_data['FVC@52'],
-                   save_path='two_model_comparison.png')
+                   save_path='two_model_comparison_2.png')
     
     print("\n" + "="*80)
     print("✅ COMPARISON COMPLETE")

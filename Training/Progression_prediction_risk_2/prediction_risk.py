@@ -108,7 +108,7 @@ if __name__ == "__main__":
     # PATHS AND HYPERPARAMETERS
     # =============================================================================
     CSV_PATH = 'Training/CNN_Slope_Prediction/train_with_coefs.csv'
-    CSV_PATH_LABEL_52 = 'Training/Progression_prediction_risk/data/patient_progression_52w.csv'
+    CSV_PATH_LABEL_52 = 'Training/Progression_prediction_risk_2/data/patient_progression_52w.csv'
     CSV_FEATURES_PATH = 'Training/CNN_Slope_Prediction/patient_features.csv'
     NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
 
@@ -130,9 +130,9 @@ if __name__ == "__main__":
     print("[3/10] LOADING TRAIN/VAL/TEST SPLITS")
     print("="*80)
 
-    train_ids = pd.read_csv("Training/Progression_prediction_risk/data/train_patients_52w.csv")['Patient'].tolist()
-    val_ids   = pd.read_csv("Training/Progression_prediction_risk/data/val_patients_52w.csv")['Patient'].tolist()
-    test_ids  = pd.read_csv("Training/Progression_prediction_risk/data/test_patients_52w.csv")['Patient'].tolist()
+    train_ids = pd.read_csv("Training/Progression_prediction_risk_2/data/train_patients_52w.csv")['Patient'].tolist()
+    val_ids   = pd.read_csv("Training/Progression_prediction_risk_2/data/val_patients_52w.csv")['Patient'].tolist()
+    test_ids  = pd.read_csv("Training/Progression_prediction_risk_2/data/test_patients_52w.csv")['Patient'].tolist()
 
     print(f"✓ Train patients: {len(train_ids)}")
     print(f"✓ Val patients: {len(val_ids)}")
@@ -323,7 +323,7 @@ if __name__ == "__main__":
         model=model,
         train_loader=train_loader,  # Your train DataLoader with batch_size=32
         val_loader=val_loader,      # Your validation DataLoader
-        epochs=50,
+        epochs=100,
         lr=1e-4,
         weight_decay=1e-2,
         grad_clip=1.0,

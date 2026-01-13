@@ -86,8 +86,7 @@ HAND_FEATURE_ORDER = [
     'kurtosis',
     'age',
     'sex',
-    'smoking_status',
-    'fvc_baseline'  # ⭐ CRITICAL: Add baseline FVC as 13th feature
+    'smoking_status'
 ]
 
 NORMALIZE_FEATURES = [
@@ -100,9 +99,9 @@ NORMALIZE_FEATURES = [
     'mean',
     'skew',
     'kurtosis',
-    'age',
-    'fvc_baseline'  # ⭐ CRITICAL: Normalize baseline FVC too
+    'age'
 ]
+
 class FusionMLPOptuna(nn.Module):
     """Flexible MLP architecture for Optuna optimization"""
     

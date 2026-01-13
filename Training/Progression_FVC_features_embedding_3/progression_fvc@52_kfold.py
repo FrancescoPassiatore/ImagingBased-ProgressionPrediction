@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
+import os
 from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
@@ -129,9 +130,6 @@ if __name__ == "__main__":
         else:
             baseline_fvc[patient_id] = 0.0
     
-    for patient_id in features_data.keys():
-        features_data[patient_id]['fvc_baseline'] = baseline_fvc.get(patient_id, 0.0)
-    
     print(f"✓ FVC Baseline loaded for {len(baseline_fvc)} patients")
 
     # =============================================================================
@@ -177,25 +175,40 @@ if __name__ == "__main__":
     print(f"✓ Feature stats computed from {len(kfold_ids)} kfold patients")
 
     # =============================================================================
-    # STEP 7: K-FOLD CROSS-VALIDATION
+    # STEP 7: K-FOLD CROSS-VALIDATION (SKIP IF ALREADY DONE)
     # =============================================================================
     print("\n[7/7] RUNNING K-FOLD CROSS-VALIDATION")
-    
-    kfold_results = train_kfold(
-        model_class=SimpleFusionMLP,
-        patient_ids=kfold_ids,
-        label_csv=CSV_PATH_LABEL_52,
-        embeddings_dict=patient_embeddings,
-        handcrafted_dict=features_data,
-        feature_stats=feature_stats,
-        n_splits=5,
-        epochs=100,
-        lr=1e-4,
-        weight_decay=5e-2,
-        grad_clip=1.0,
-        device=device
-    )
 
+    kfold_df = pd.read_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_FVC_features_embedding_3\results\kfold_results_2.csv')
+    kfold_results = {
+        'mean_mae': kfold_df['mae'].mean(),
+        'std_mae': kfold_df['mae'].std(),
+        'mean_rmse': kfold_df['rmse'].mean(),
+        'std_rmse': kfold_df['rmse'].std(),
+        'mean_r2': kfold_df['r2'].mean(),
+        'std_r2': kfold_df['r2'].std(),
+    }
+    print(f"\n✓ Loaded k-fold results:")
+    print(f"   MAE:  {kfold_results['mean_mae']:.2f} ± {kfold_results['std_mae']:.2f} mL")
+    print(f"   RMSE: {kfold_results['mean_rmse']:.2f} ± {kfold_results['std_rmse']:.2f} mL")
+    print(f"   R²:   {kfold_results['mean_r2']:.4f} ± {kfold_results['std_r2']:.4f}")
+    """
+        print("\n⚠️  K-fold results not found. Running k-fold training...")
+        kfold_results = train_kfold(
+            model_class=SimpleFusionMLP,
+            patient_ids=kfold_ids,
+            label_csv=CSV_PATH_LABEL_52,
+            embeddings_dict=patient_embeddings,
+            handcrafted_dict=features_data,
+            feature_stats=feature_stats,
+            n_splits=5,
+            epochs=100,
+            lr=1e-4,
+            weight_decay=5e-2,
+            grad_clip=1.0,
+            device=device
+        )
+    """
     # =============================================================================
     # FINAL EVALUATION ON HOLDOUT TEST SET
     # =============================================================================
@@ -239,10 +252,13 @@ if __name__ == "__main__":
     # Train final model
     final_model = SimpleFusionMLP(
         img_dim=320,
-        hand_dim=12,  # Changed from 13 (removed fvc_baseline)
+        hand_dim=12,  # 12 handcrafted features (removed fvc_baseline)
         hidden=32,
         dropout=0.5
     ).to(device)
+    
+    print("\n⚠️  Note: Model architecture changed (hand_dim: 13→12 after removing fvc_baseline)")
+    print("     Retraining model from scratch with new feature configuration...")
     
     # Create a dummy val_loader (won't be used for saving, just for training)
     history = train_model(
