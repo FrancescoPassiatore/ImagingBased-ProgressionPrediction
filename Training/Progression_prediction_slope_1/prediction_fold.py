@@ -525,31 +525,37 @@ if __name__ == "__main__":
         print(f"   {key}: {value:.2f}" if isinstance(value, float) else f"   {key}: {value}")
 
     # =============================================================================
-    # EVALUATE ALL PATIENTS
+    # EVALUATE ON HELD-OUT TEST SET
     # =============================================================================
     
     print("\n" + "="*80)
-    print("[EVALUATION] PROGRESSION PREDICTION ON ALL PATIENTS")
+    print("[EVALUATION] PROGRESSION PREDICTION ON HELD-OUT TEST SET")
     print("="*80)
     
-    # Get progression labels for all patients
+    # Load consistent test set (same as Approaches 2 & 3)
+    test_patients_df = pd.read_csv("Training/Progression_prediction_risk_2/data/test_patients_52w.csv")
+    test_patients = test_patients_df['Patient'].tolist()
+    
+    # Get progression labels for test patients only
     patient_labels = get_patient_progression_labels(patient_data)
-    all_patients = list(patient_labels.keys())
+    test_patient_labels = {pid: patient_labels[pid] for pid in test_patients if pid in patient_labels}
     
-    print(f"\n✓ Total patients: {len(all_patients)}")
-    print(f"✓ Progression cases: {sum(patient_labels.values())}")
-    print(f"✓ Stable cases: {len(all_patients) - sum(patient_labels.values())}")
+    print(f"\n✓ Test patients (held-out): {len(test_patient_labels)}")
+    print(f"✓ Progression cases: {sum(test_patient_labels.values())}")
+    print(f"✓ Stable cases: {len(test_patient_labels) - sum(test_patient_labels.values())}")
+    print(f"\n⚠️  Using SAME test set as Approaches 2 & 3 (fair comparison)")
+    print(f"   Excludes patients used to train CNN + SlopeCorrector")
     
-    # Create dataset with all patients
+    # Create dataset with test patients only
     dataset = IPFSliceDataset(
-        all_patients,
+        test_patients,
         patient_data,
         features_data,
         normalize_slope=True,
         image_size=IMAGE_SIZE
     )
     
-    print(f"\n✓ Dataset created:")
+    print(f"\n✓ Test dataset created:")
     print(f"   Total slices: {len(dataset)}")
     print(f"   Patients: {len(dataset.patients)}")
     
@@ -567,11 +573,11 @@ if __name__ == "__main__":
     
     print("\n✓ Predictor initialized with frozen models")
     
-    # Evaluate all patients
+    # Evaluate test patients
     print("\nRunning predictions...")
     metrics, results_df = predictor.evaluate_progression_accuracy(
         dataset,
-        all_patients
+        test_patients
     )
     
     # Display results
@@ -675,7 +681,10 @@ if __name__ == "__main__":
     # Aggregate by patient for final predictions
     patient_predictions = []
     
-    for patient_id in all_patients:
+    for patient_id in test_patients:
+        if patient_id not in test_patient_labels:
+            continue
+            
         patient_results = results_df[results_df['patient_id'] == patient_id]
         
         if len(patient_results) == 0:
@@ -689,7 +698,7 @@ if __name__ == "__main__":
         probability = float(max(0.0, min(max_decline / 10.0, 1.0)))
         
         # True label
-        true_label = patient_labels.get(patient_id, None)
+        true_label = test_patient_labels.get(patient_id, None)
         
         patient_predictions.append({
             'patient_id': patient_id,
