@@ -279,7 +279,7 @@ if __name__ == "__main__":
     
     # Model 1: prediction_fold
     try:
-        fold_df = pd.read_csv('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\prediction_fold_final.csv')
+        fold_df = pd.read_csv('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training\\Progression_prediction_slope_1\\output_without_dataleakage\\prediction_fold_final.csv')
         print(f"✓ Model 1 (prediction_fold): {len(fold_df)} predictions")
     except FileNotFoundError:
         print("❌ Error: 'prediction_fold_final.csv' not found")
