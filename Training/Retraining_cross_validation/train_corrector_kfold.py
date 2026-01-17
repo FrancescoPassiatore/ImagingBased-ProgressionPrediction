@@ -49,13 +49,13 @@ from utilities import (
 
 CONFIG = {
     # Paths
-    'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
-    'features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
+    'csv_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv',
+    'features_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv',
     'npy_dir': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy',
     
     # Training
     'n_folds': 5,
-    'n_epochs': 100,
+    'n_epochs': 200,
     'patience': 15,
     'batch_size': 32,
     'lr': 1e-3,
@@ -266,6 +266,29 @@ def train_corrector_fold(fold_idx, approach_key, approach_config, train_ids, val
     # Create model
     model = approach_config['model_class'](**approach_config['model_kwargs']).to(config['device'])
     
+    # CNN-only has no trainable parameters - skip training
+    if approach_key == 'cnn_only':
+        print("⏭️  CNN-only has no trainable parameters - skipping training")
+        
+        # Just validate to get metrics
+        val_results = validate_corrector(model, val_loader, config['device'])
+        
+        # Save model (empty state dict) and scaler
+        checkpoint_path = config['checkpoint_dir'] / f'{approach_key}_fold{fold_idx}.pth'
+        torch.save(model.state_dict(), checkpoint_path)
+        
+        scaler_path = config['checkpoint_dir'] / f'{approach_key}_scaler_fold{fold_idx}.pkl'
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(train_dataset.scaler, f)
+        
+        return {
+            'model_state': model.state_dict(),
+            'history': {'train_loss': [], 'val_loss': []},
+            'best_val_loss': val_results['mse'],
+            'final_val_results': val_results,
+            'scaler': train_dataset.scaler
+        }
+    
     # Optimizer and criterion
     optimizer = optim.Adam(
         model.parameters(),
@@ -277,8 +300,7 @@ def train_corrector_fold(fold_idx, approach_key, approach_config, train_ids, val
         optimizer,
         mode='min',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
     
     criterion = nn.MSELoss()
@@ -377,10 +399,27 @@ def main():
     # Train each approach for each fold
     all_results = {key: [] for key in APPROACHES.keys()}
     
-    for fold_idx, (train_ids, val_ids) in enumerate(splits):
+    for fold_idx, (train_ids, val_ids, test_ids) in enumerate(splits):
         print(f"\n{'='*80}")
         print(f"PROCESSING FOLD {fold_idx + 1}/{CONFIG['n_folds']}")
+        print(f"Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
         print(f"{'='*80}")
+        
+        # Check if all approaches for this fold are already trained
+        all_trained = True
+        for approach_key in APPROACHES.keys():
+            checkpoint_path = CONFIG['checkpoint_dir'] / f'{approach_key}_fold{fold_idx}.pth'
+            results_path = CONFIG['results_dir'] / f'fold{fold_idx}_{approach_key}_results.pkl'
+            if not (checkpoint_path.exists() and results_path.exists()):
+                all_trained = False
+                break
+        
+        if all_trained:
+            print(f"⏭️  All approaches already trained for this fold - loading results")
+            for approach_key in APPROACHES.keys():
+                results = load_fold_results(fold_idx, approach_key, CONFIG['results_dir'])
+                all_results[approach_key].append(results)
+            continue
         
         # Load CNN model for this fold
         cnn_model = ImprovedSliceLevelCNN(backbone_name='efficientnet_b0', pretrained=False)
@@ -410,6 +449,18 @@ def main():
         
         # Train each approach
         for approach_key, approach_config in APPROACHES.items():
+            # Check if this approach is already trained
+            checkpoint_path = CONFIG['checkpoint_dir'] / f'{approach_key}_fold{fold_idx}.pth'
+            results_path = CONFIG['results_dir'] / f'fold{fold_idx}_{approach_key}_results.pkl'
+            
+            if checkpoint_path.exists() and results_path.exists():
+                print(f"\n⏭️  SKIPPING {approach_config['name']} - Already trained")
+                
+                # Load existing results
+                results = load_fold_results(fold_idx, approach_key, CONFIG['results_dir'])
+                all_results[approach_key].append(results)
+                continue
+            
             results = train_corrector_fold(
                 fold_idx,
                 approach_key,

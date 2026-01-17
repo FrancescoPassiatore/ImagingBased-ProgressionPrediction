@@ -24,6 +24,16 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # FUNZIONI DI SUPPORTO
 # ==========================
 
+def dicom_to_hu(ds):
+    """Convert DICOM pixel array to Hounsfield Units."""
+    img = ds.pixel_array.astype(np.float32)
+    
+    slope = float(ds.RescaleSlope) if 'RescaleSlope' in ds else 1.0
+    intercept = float(ds.RescaleIntercept) if 'RescaleIntercept' in ds else 0.0
+    
+    img = img * slope + intercept
+    return img
+
 def lung_seg_pixel_ratio(img_array):
     """Calcola numero pixel non-zero e area relativa."""
     c = np.count_nonzero(img_array)
@@ -31,82 +41,62 @@ def lung_seg_pixel_ratio(img_array):
 
 def make_lungmask(img):
     """
-    Genera una maschera polmonare semplice (stessa logica del tuo script di selezione).
-    Ritorna: img_norm, mask
+    Genera una maschera polmonare da immagine in HU.
+    Ritorna: mask binaria
     """
-    img = img.astype(float)
+    img_norm = (img - np.mean(img)) / (np.std(img) + 1e-6)
+    
     row_size, col_size = img.shape
-
-    # Normalizzazione base
-    mean = np.mean(img)
-    std = np.std(img) if np.std(img) > 0 else 1.0
-    img = (img - mean) / std
-
-    # Regione centrale
-    middle = img[int(col_size/5):int(col_size/5*4), int(row_size/5):int(row_size/5*4)]
-    mean = np.mean(middle)
-    max_val = np.max(img)
-    min_val = np.min(img)
-
-    img[img == max_val] = mean
-    img[img == min_val] = mean
-
-    # KMeans per soglia
+    middle = img_norm[int(col_size/5):int(col_size/5*4),
+                      int(row_size/5):int(row_size/5*4)]
+    
     from sklearn.cluster import KMeans
     kmeans = KMeans(n_clusters=2, random_state=42, n_init=10).fit(
-        np.reshape(middle, [np.prod(middle.shape), 1])
+        middle.reshape(-1, 1)
     )
-    centers = sorted(kmeans.cluster_centers_.flatten())
-    threshold = np.mean(centers)
-    thresh_img = np.where(img < threshold, 1.0, 0.0)
+    threshold = np.mean(sorted(kmeans.cluster_centers_.flatten()))
+    thresh_img = np.where(img_norm < threshold, 1.0, 0.0)
+    
+    eroded = morphology.erosion(thresh_img, np.ones((3, 3)))
+    dilated = morphology.dilation(eroded, np.ones((8, 8)))
+    
+    labels = measure.label(dilated)
+    mask = np.zeros_like(img, dtype=np.uint8)
+    
+    for prop in measure.regionprops(labels):
+        y0, x0, y1, x1 = prop.bbox
+        if 0.2 * row_size < (y1 - y0) < 0.9 * row_size:
+            mask[labels == prop.label] = 1
+    
+    mask = morphology.dilation(mask, np.ones((10, 10)))
+    return mask
 
-    # Pulizia
-    eroded = morphology.erosion(thresh_img, np.ones([3, 3]))
-    dilation = morphology.dilation(eroded, np.ones([8, 8]))
-
-    labels = measure.label(dilation)
-    regions = measure.regionprops(labels)
-    good_labels = []
-
-    for prop in regions:
-        B = prop.bbox
-        if ((B[2]-B[0] < row_size*0.9) and (B[3]-B[1] < col_size*0.9) and
-            (B[2]-B[0] > row_size*0.20) and (B[3]-B[1] > col_size*0.10) and
-            (B[0] > row_size*0.03) and (B[2] < row_size*0.97) and
-            (B[1] > col_size*0.03) and (B[3] < col_size*0.97)):
-            good_labels.append(prop.label)
-
-    mask = np.zeros([row_size, col_size], dtype=np.int8)
-    for N in good_labels:
-        mask += np.where(labels == N, 1, 0)
-
-    mask = morphology.dilation(mask, np.ones([10, 10]))
-
-    return img, mask
-
-def preprocess_slice(img, mask=None, target_size=(224, 224)):
+def preprocess_slice_hu(img_hu, mask, target_size=(224, 224)):
     """
-    img: array 2D (CT raw)
-    mask: opzionale, stessa shape di img. Se presente, applichiamo img * mask.
-    Ritorna immagine float32 normalizzata in [0,1] e ridimensionata.
+    Preprocess CT slice in Hounsfield Units with soft masking.
+    
+    Args:
+        img_hu: immagine in Hounsfield Units
+        mask: lung mask binaria
+        target_size: dimensione output (width, height)
+    
+    Returns:
+        immagine float32 normalizzata [0,1] e ridimensionata
     """
-    if mask is not None:
-        img = img * mask
-
-    # Normalizzazione robusta usando percentili
-    # (così sei meno sensibile agli outlier)
-    v1, v99 = np.percentile(img, (1, 99))
-    if v99 - v1 < 1e-6:
-        # Evita divisione per 0: fallback a semplice scaling
-        img_norm = img - v1
-    else:
-        img_norm = (img - v1) / (v99 - v1)
-
+    # 1. Clip HU a range clinicamente significativo
+    img_hu = np.clip(img_hu, -1000, 400)
+    
+    # 2. Soft masking: mantiene contesto al 10% fuori dai polmoni
+    img_soft = img_hu * mask + img_hu * 0.1 * (1 - mask)
+    
+    # 3. Normalizzazione globale HU → [0,1]
+    # -1000 HU (aria) → 0, +400 HU (osso) → 1
+    img_norm = (img_soft + 1000) / 1400
     img_norm = np.clip(img_norm, 0.0, 1.0)
-
-    # Resize con OpenCV (cv2 usa shape (h, w))
+    
+    # 4. Resize
     img_resized = cv2.resize(img_norm, target_size, interpolation=cv2.INTER_AREA)
-
+    
     return img_resized.astype(np.float32)
 
 # ==========================
@@ -139,13 +129,17 @@ def process_all_patients():
 
             try:
                 ds = pydicom.dcmread(dcm_path)
-                img = ds.pixel_array
+                
+                # 1. Converti a Hounsfield Units
+                img_hu = dicom_to_hu(ds)
+                
+                # 2. Genera lung mask
+                mask = make_lungmask(img_hu)
+                
+                # 3. Preprocessa con soft masking e normalizzazione globale HU
+                img_pre = preprocess_slice_hu(img_hu, mask, target_size=TARGET_SIZE)
 
-                # Genera mask e preprocessa
-                img_norm, mask = make_lungmask(img)
-                img_pre = preprocess_slice(img_norm, mask=mask, target_size=TARGET_SIZE)
-
-                # Salva come .npy
+                # 4. Salva come .npy
                 np.save(out_path, img_pre)
 
             except Exception as e:

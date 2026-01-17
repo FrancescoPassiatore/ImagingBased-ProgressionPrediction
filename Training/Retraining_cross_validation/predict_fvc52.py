@@ -43,8 +43,8 @@ from utilities import (
 
 CONFIG = {
     # Paths
-    'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
-    'features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
+    'csv_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv',
+    'features_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv',
     'npy_dir': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy',
     
     # Data
@@ -55,8 +55,8 @@ CONFIG = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
     # Input/Output
-    'checkpoint_dir': Path('Training/Retraining_cross_validation/checkpoints'),
-    'results_dir': Path('Training/Retraining_cross_validation/results'),
+    'checkpoint_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Retraining_cross_validation\Training\Retraining_cross_validation\checkpoints'),
+    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Retraining_cross_validation\Training\Retraining_cross_validation\results'),
 }
 
 # Define approaches
@@ -207,17 +207,16 @@ def predict_fvc52_for_approach(fold_idx, approach_key, approach_config, patient_
         if corrector_scaler is not None:
             input_vector = corrector_scaler.transform(input_vector.reshape(1, -1))[0]
         
-        # Predict corrected slope (normalized)
+        # Predict corrected slope (already denormalized from corrector)
         with torch.no_grad():
             input_tensor = torch.tensor(input_vector, dtype=torch.float32).unsqueeze(0).to(config['device'])
-            slope_corrected_norm = corrector_model(input_tensor).cpu().item()
+            slope_corrected = corrector_model(input_tensor).cpu().item()
         
-        # Denormalize slope
-        slope_corrected = slope_scaler.inverse_transform([[slope_corrected_norm]])[0][0]
+        # Note: Corrector outputs raw (denormalized) slope, no need to inverse_transform
         
-        # Get baseline FVC and week
+        # Get baseline FVC (intercept at week 0) and baseline week
         baseline_fvc = patient_data[patient_id]['intercept']
-        baseline_week = patient_data[patient_id]['weeks'][0]
+        baseline_week = 0.0  # Intercept is defined at week 0
         
         # Predict FVC@52
         fvc52_pred = predict_fvc_at_week(baseline_fvc, slope_corrected, config['target_week'], baseline_week)
@@ -228,7 +227,7 @@ def predict_fvc52_for_approach(fold_idx, approach_key, approach_config, patient_
         
         # Find closest measurement to week 52
         week_52_idx = np.argmin(np.abs(weeks - config['target_week']))
-        if np.abs(weeks[week_52_idx] - config['target_week']) <= 4:  # Within 4 weeks
+        if np.abs(weeks[week_52_idx] - config['target_week']) <= 8:  # Within 8 weeks
             fvc52_true = fvc_values[week_52_idx]
         else:
             fvc52_true = None
@@ -247,7 +246,7 @@ def predict_fvc52_for_approach(fold_idx, approach_key, approach_config, patient_
     return pd.DataFrame(predictions)
 
 
-def get_true_fvc52(patient_id, patient_data, target_week=52, tolerance=4):
+def get_true_fvc52(patient_id, patient_data, target_week=52, tolerance=8):
     """Get true FVC@52 for a patient (if available)"""
     if patient_id not in patient_data:
         return None
@@ -289,6 +288,10 @@ def main():
     
     # Load K-Fold splits
     splits_path = CONFIG['results_dir'] / 'kfold_splits.pkl'
+    if not splits_path.exists():
+        # Try alternate path
+        splits_path = Path('Training/Retraining_cross_validation/Training/Retraining_cross_validation/results/kfold_splits.pkl')
+    
     with open(splits_path, 'rb') as f:
         splits = pickle.load(f)
     print(f"✓ Loaded {len(splits)} folds")
@@ -297,21 +300,22 @@ def main():
     all_fold_predictions = {key: [] for key in APPROACHES.keys()}
     all_fold_metrics = {key: [] for key in APPROACHES.keys()}
     
-    for fold_idx, (train_ids, val_ids) in enumerate(splits):
+    for fold_idx, (train_ids, val_ids, test_ids) in enumerate(splits):
         print(f"\n{'='*80}")
         print(f"FOLD {fold_idx + 1}/{len(splits)}")
+        print(f"Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
         print(f"{'='*80}")
         
         # Predict for each approach
         for approach_key, approach_config in APPROACHES.items():
             print(f"\n{approach_config['name']}:")
             
-            # Predict on validation set
+            # Predict on TEST set (held-out data for final evaluation)
             predictions_df = predict_fvc52_for_approach(
                 fold_idx,
                 approach_key,
                 approach_config,
-                val_ids,
+                test_ids,  # Changed from val_ids to test_ids
                 patient_data,
                 features_data,
                 CONFIG
@@ -338,13 +342,17 @@ def main():
                 print(f"  No patients with FVC@52 measurements")
                 metrics = None
             
-            # Save predictions
-            predictions_df['fold'] = fold_idx
-            all_fold_predictions[approach_key].append(predictions_df)
+            # Filter out patients without valid FVC@52 before saving
+            predictions_to_save = predictions_df[predictions_df['has_true_fvc52'] == True].copy()
+            
+            # Save predictions (only those with valid FVC@52)
+            predictions_to_save['fold'] = fold_idx
+            all_fold_predictions[approach_key].append(predictions_to_save)
             
             # Save individual fold predictions
             save_path = CONFIG['results_dir'] / f'{approach_key}_fold{fold_idx}_fvc52_predictions.csv'
-            predictions_df.to_csv(save_path, index=False)
+            predictions_to_save.to_csv(save_path, index=False)
+            print(f"  Saved {len(predictions_to_save)} patients (filtered from {len(predictions_df)} total)")
     
     # Aggregate results across folds
     print("\n" + "="*80)

@@ -94,8 +94,8 @@ class IPFDataLoader:
             patient_data[patient_id] = {
                 'weeks': weeks.tolist(),
                 'fvc_values': fvc_values.tolist(),
-                'intercept': float(patient_df['Intercept'].iloc[0]),
-                'slope': float(patient_df['Slope'].iloc[0])
+                'intercept': float(patient_df['fvc_intercept0'].iloc[0]),
+                'slope': float(patient_df['fvc_slope'].iloc[0])
             }
         
         # Build features_data dictionary
@@ -124,21 +124,43 @@ class IPFDataLoader:
 # K-FOLD SPLITTING
 # =============================================================================
 
-def create_kfold_splits(patient_ids: List[str], n_splits: int = 5, random_state: int = 42) -> List[Tuple[List[str], List[str]]]:
+def create_kfold_splits(patient_ids: List[str], n_splits: int = 5, random_state: int = 42) -> List[Tuple[List[str], List[str], List[str]]]:
     """
-    Create K-Fold splits for patients
+    Create K-Fold splits for patients with train/val/test sets
+    
+    Strategy: Divide patients into n_splits groups. For each fold:
+    - 3 groups -> train (60%)
+    - 1 group -> validation (20%)
+    - 1 group -> test (20%)
     
     Returns:
-        List of (train_ids, val_ids) tuples
+        List of (train_ids, val_ids, test_ids) tuples
     """
+    from sklearn.model_selection import KFold
+    
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     patient_ids = np.array(patient_ids)
     
+    # First, create 5 equal groups
+    all_folds = []
+    for _, fold_idx in kf.split(patient_ids):
+        all_folds.append(patient_ids[fold_idx].tolist())
+    
     splits = []
-    for train_idx, val_idx in kf.split(patient_ids):
-        train_ids = patient_ids[train_idx].tolist()
-        val_ids = patient_ids[val_idx].tolist()
-        splits.append((train_ids, val_ids))
+    for i in range(n_splits):
+        # Rotate which folds are train/val/test
+        test_fold = i
+        val_fold = (i + 1) % n_splits
+        train_folds = [j for j in range(n_splits) if j not in [test_fold, val_fold]]
+        
+        train_ids = []
+        for fold_idx in train_folds:
+            train_ids.extend(all_folds[fold_idx])
+        
+        val_ids = all_folds[val_fold]
+        test_ids = all_folds[test_fold]
+        
+        splits.append((train_ids, val_ids, test_ids))
     
     return splits
 

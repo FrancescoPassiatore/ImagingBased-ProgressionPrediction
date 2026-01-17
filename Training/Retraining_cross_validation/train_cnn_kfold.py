@@ -37,8 +37,8 @@ from utilities import (
 
 CONFIG = {
     # Paths
-    'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
-    'features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
+    'csv_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv',
+    'features_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv',
     'npy_dir': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy',
     
     # Model
@@ -235,8 +235,7 @@ def train_fold(fold_idx, train_ids, val_ids, patient_data, features_data, config
         optimizer,
         mode='min',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
     
     criterion = nn.MSELoss()
@@ -312,6 +311,11 @@ def main():
     print("CNN SLOPE PREDICTOR - 5-FOLD CROSS-VALIDATION")
     print("="*80)
     
+    # Create output directories
+    CONFIG['checkpoint_dir'].mkdir(parents=True, exist_ok=True)
+    CONFIG['results_dir'].mkdir(parents=True, exist_ok=True)
+    CONFIG['plots_dir'].mkdir(parents=True, exist_ok=True)
+    
     # Device info
     print(f"\nDevice: {CONFIG['device']}")
     if CONFIG['device'] == 'cuda':
@@ -340,13 +344,13 @@ def main():
     
     # Create K-Fold splits
     print("\n" + "="*80)
-    print("CREATING K-FOLD SPLITS")
+    print("CREATING K-FOLD SPLITS (Train/Val/Test)")
     print("="*80)
     
     splits = create_kfold_splits(all_patient_ids, n_splits=CONFIG['n_folds'], random_state=42)
     
-    for i, (train_ids, val_ids) in enumerate(splits):
-        print(f"Fold {i+1}: Train={len(train_ids)}, Val={len(val_ids)}")
+    for i, (train_ids, val_ids, test_ids) in enumerate(splits):
+        print(f"Fold {i+1}: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
     
     # Save splits
     splits_path = CONFIG['results_dir'] / 'kfold_splits.pkl'
@@ -361,7 +365,22 @@ def main():
     
     all_fold_results = []
     
-    for fold_idx, (train_ids, val_ids) in enumerate(splits):
+    for fold_idx, (train_ids, val_ids, test_ids) in enumerate(splits):
+        # Check if this fold is already completed
+        checkpoint_path = CONFIG['checkpoint_dir'] / f'cnn_fold{fold_idx}.pth'
+        results_path = CONFIG['results_dir'] / f'fold{fold_idx}_cnn_results.pkl'
+        
+        if checkpoint_path.exists() and results_path.exists():
+            print(f"\n{'='*80}")
+            print(f"⏭️  SKIPPING FOLD {fold_idx + 1}/{CONFIG['n_folds']} - Already completed")
+            print(f"{'='*80}")
+            
+            # Load existing results
+            with open(results_path, 'rb') as f:
+                fold_results = pickle.load(f)
+            all_fold_results.append(fold_results)
+            continue
+        
         fold_results = train_fold(
             fold_idx,
             train_ids,
@@ -372,6 +391,11 @@ def main():
         )
         
         all_fold_results.append(fold_results)
+        
+        # Save test set IDs for this fold
+        test_ids_path = CONFIG['results_dir'] / f'test_ids_fold{fold_idx}.pkl'
+        with open(test_ids_path, 'wb') as f:
+            pickle.dump(test_ids, f)
         
         # Save fold results
         save_fold_results(
