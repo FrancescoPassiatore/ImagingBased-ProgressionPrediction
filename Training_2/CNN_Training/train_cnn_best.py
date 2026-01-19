@@ -20,6 +20,8 @@ import pickle
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
+import copy
+
 
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
@@ -116,9 +118,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
         slopes = batch['slopes'].to(device)
         lengths = batch['lengths'].tolist()
         patient_ids = batch['patient_ids']
-
-        extreme_in_batch = (torch.abs(slopes[:len(lengths)]) > extreme_threshold).sum().item()
-        n_extreme_cases += extreme_in_batch
+        
+        
         
         # Forward pass
         if use_attention:
@@ -136,6 +137,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
         # Aggregate per patient with attention weighting
         pred_blocks = torch.split(preds_per_slice, lengths)
         slopes_blocks = torch.split(slopes, lengths)
+        
+        patient_slopes = torch.stack([block[0] for block in slopes_blocks])
+        extreme_in_batch = (torch.abs(patient_slopes) > extreme_threshold).sum().item()
+        n_extreme_cases += extreme_in_batch
         
         if attention_weights is not None:
             # Attention-weighted average with temperature scaling
@@ -159,7 +164,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
             
             # Compute loss without reduction
             # For FocalMSELoss and FocalHuberLoss
-            if isinstance(criterion, (FixedFocalMSELoss)):
+            if isinstance(criterion, FixedFocalMSELoss):
                 # These already compute per-sample loss
                 loss_per_sample = criterion.forward_without_reduction(patient_preds, patient_slopes)
             else:
@@ -388,7 +393,7 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             train_dataset,
             patients_per_batch=best_params['batch_size'],
             extreme_percentile=25,
-            oversample_factor=4.0
+            oversample_factor=4.0,
             shuffle=True
         )
         train_loader = DataLoader(
@@ -416,18 +421,44 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             pin_memory=True
         )
     
-        val_loader = DataLoader(
+    val_loader = DataLoader(
+        val_dataset,
+        batch_sampler=PatientBatchSampler(
             val_dataset,
-            batch_sampler=PatientBatchSampler(
-                val_dataset,
-                patients_per_batch=best_params['batch_size'],
-                shuffle=False
-            ),
-            collate_fn=patient_group_collate,
-            num_workers=4,
-            pin_memory=True
-        )
+            patients_per_batch=best_params['batch_size'],
+            shuffle=False
+        ),
+        collate_fn=patient_group_collate,
+        num_workers=4,
+        pin_memory=True
+    )
     
+    
+    # Clean loaders for prediction (NO oversampling)
+    train_pred_loader = DataLoader(
+        train_dataset,
+        batch_sampler=PatientBatchSampler(
+            train_dataset,
+            patients_per_batch=best_params['batch_size'],
+            shuffle=False
+        ),
+        collate_fn=patient_group_collate,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    val_pred_loader = DataLoader(
+        val_dataset,
+        batch_sampler=PatientBatchSampler(
+            val_dataset,
+            patients_per_batch=best_params['batch_size'],
+            shuffle=False
+        ),
+        collate_fn=patient_group_collate,
+        num_workers=4,
+        pin_memory=True
+    )
+
     # Model
     model = ImprovedSliceLevelCNN(
         backbone_name=config['backbone'],
@@ -483,7 +514,7 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         criterion = nn.HuberLoss(delta=config['huber_delta'])
         print(f"✓ Using Huber Loss (delta={config['huber_delta']})")
     elif config['loss_type'] == 'fixed_focal':
-        criterion = FixedFocalMSELoss(gamma=1.5)
+        criterion = FixedFocalMSELoss(gamma=config['focal_gamma'])
         print(f"✓ Using Fixed Focal Loss (gamma={config['focal_gamma']})")
     else:
         criterion = nn.MSELoss()
@@ -509,7 +540,7 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
     for epoch in range(config['n_epochs']):
         print(f"Epoch {epoch + 1}/{config['n_epochs']}: ", end='', flush=True)
         
-        train_loss = train_epoch(
+        train_loss , extreme_pct = train_epoch(
             model, train_loader, optimizer, criterion, config['device'],
             gradient_clip=best_params['gradient_clip'],
             accumulation_steps=best_params['accumulation_steps'],
@@ -535,10 +566,14 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
-              f"MAE: {val_metrics['mae']:.6f} | RMSE: {val_metrics['rmse']:.6f} | "
-              f"R²: {val_metrics['r2']:.4f} | LR: {current_lr:.2e}", end='', flush=True)
-        
+        print(
+                f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
+                f"MAE: {val_metrics['mae']:.6f} | RMSE: {val_metrics['rmse']:.6f} | "
+                f"R²: {val_metrics['r2']:.4f} | LR: {current_lr:.2e} | "
+                f"Ext%: {extreme_pct:.1f}%",
+                end='',
+                flush=True
+            )
         # Update scheduler
         if best_params['scheduler'] == 'ReduceLROnPlateau':
             scheduler.step(val_loss)
@@ -555,7 +590,7 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         # Early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
+            best_model_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
             print(" ✓ Best")
         else:
@@ -632,10 +667,22 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         pin_memory=True
     )
     
-    train_preds = predict_fold(model, train_loader, config['device'], 
-                                train_dataset.slope_scaler, use_attention=best_params['use_attention'])
-    val_preds = predict_fold(model, val_loader, config['device'], 
-                             train_dataset.slope_scaler, use_attention=best_params['use_attention'])
+    train_preds = predict_fold(
+        model,
+        train_pred_loader,
+        config['device'],
+        train_dataset.slope_scaler,
+        use_attention=best_params['use_attention']
+    )
+
+    val_preds = predict_fold(
+        model,
+        val_pred_loader,
+        config['device'],
+        train_dataset.slope_scaler,
+        use_attention=best_params['use_attention']
+    )
+    
     test_preds = predict_fold(model, test_loader, config['device'], 
                               train_dataset.slope_scaler, use_attention=best_params['use_attention'])
     
