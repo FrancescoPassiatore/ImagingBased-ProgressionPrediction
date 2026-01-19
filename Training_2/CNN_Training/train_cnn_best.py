@@ -8,6 +8,7 @@ Saves models and predictions for MLP corrector training.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
@@ -29,7 +30,16 @@ from utilities import (
     PatientBatchSampler,
     patient_group_collate,
     ImprovedSliceLevelCNN,
-    compute_metrics
+    compute_metrics,
+    compute_inverse_frequency_weights,
+    FocalMSELoss,
+    FocalHuberLoss,
+    StratifiedPatientSampler,
+    PredictionTracker,
+    analyze_batch_diversity,
+    ExtremeOversamplingBatchSampler,
+    compute_exponential_weights,
+    FixedFocalMSELoss
 )
 
 # =============================================================================
@@ -43,29 +53,40 @@ CONFIG = {
     'npy_dir': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy',
     
     # Best params from Optuna
-    'best_params_path': Path('Training_2/CNN_Training/best_params.yaml'),
+    'best_params_path': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\CNN_Training\\optuna\\best_params.yaml'),
     
     # Training
     'n_folds': 5,
     'n_epochs': 100,
     'patience': 20,
     'image_size': (224, 224),
-    'backbone': 'efficientnet_b0',
+    'backbone': 'efficientnet_b1',  # Changed from efficientnet_b0
     'pretrained': True,
     'normalize_slope': False,
+    
+    # Loss function: 'mse', 'huber', 'focal_mse', 'focal_huber'
+    'loss_type': 'fixed_focal',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
+    'focal_gamma': 1.5,  # Reduced from 2.0 for balanced focus
+    'huber_delta': 1.0,  # Huber loss delta
+    
+    # Stratified sampling
+    'use_stratified_sampling': True,
+    'n_strata_bins': 4,  # Number of slope bins for stratification
     
     # Device
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
     # Output
-    'checkpoint_dir': Path('Training_2/CNN_Training/final_checkpoints_no_norm'),
-    'predictions_dir': Path('Training_2/CNN_Training/predictions_no_norm'),
-    'results_dir': Path('Training_2/CNN_Training/final_results_no_norm')
+    'checkpoint_dir': Path('Training_2/CNN_Training/final_checkpoints_efficientnet_b1_strat'),
+    'predictions_dir': Path('Training_2/CNN_Training/predictions_efficientnet_b1_strat'),
+    'results_dir': Path('Training_2/CNN_Training/final_results_efficientnet_b1_strat'),
+    'diagnostics_dir': Path('Training_2/CNN_Training/diagnostics_efficientnet_b1_strat')
 }
+
 
 # Create directories
 for dir_path in [CONFIG['checkpoint_dir'], CONFIG['predictions_dir'], 
-                 CONFIG['results_dir']]:
+                 CONFIG['results_dir'], CONFIG['diagnostics_dir']]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
@@ -73,14 +94,19 @@ for dir_path in [CONFIG['checkpoint_dir'], CONFIG['predictions_dir'],
 # =============================================================================
 
 def train_epoch(model, dataloader, optimizer, criterion, device, 
-                gradient_clip=1.0, accumulation_steps=1, use_attention=False):
-    """Train for one epoch"""
+                gradient_clip=1.0, accumulation_steps=1, use_attention=False,
+                sample_weights_dict=None):
+    """Train for one epoch with optional sample weighting"""
     model.train()
     total_loss = 0.0
     n_patients = 0
     
     optimizer.zero_grad()
     batch_idx = -1
+
+    n_extreme_cases = 0
+    extreme_threshold = 10
+
     
     for batch_idx, batch in enumerate(dataloader):
         if batch is None:
@@ -89,24 +115,63 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
         images = batch['images'].to(device)
         slopes = batch['slopes'].to(device)
         lengths = batch['lengths'].tolist()
+        patient_ids = batch['patient_ids']
+
+        extreme_in_batch = (torch.abs(slopes[:len(lengths)]) > extreme_threshold).sum().item()
+        n_extreme_cases += extreme_in_batch
         
         # Forward pass
         if use_attention:
-            preds_per_slice, _ = model(images, return_attention=True)
+            preds_per_slice, attention_weights = model(images, return_attention=True)
+            # ✓ FIXED: Proper attention reduction
+            # attention_weights shape should be (batch_slices,) not (batch_slices, H, W)
+            if attention_weights.dim() > 1:
+                attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
         else:
             preds_per_slice = model(images)
+            attention_weights = None
         
         preds_per_slice = preds_per_slice.view(-1)
         
-        # Aggregate per patient
+        # Aggregate per patient with attention weighting
         pred_blocks = torch.split(preds_per_slice, lengths)
         slopes_blocks = torch.split(slopes, lengths)
         
-        patient_preds = torch.stack([block.mean() for block in pred_blocks])
+        if attention_weights is not None:
+            # Attention-weighted average with temperature scaling
+            attention_blocks = torch.split(attention_weights, lengths)
+            patient_preds = torch.stack([
+                (pred_block * torch.softmax(attn_block / 0.5, dim=0)).sum()  # temperature = 0.5
+                for pred_block, attn_block in zip(pred_blocks, attention_blocks)
+            ])
+        else:
+            # Simple mean (fallback)
+            patient_preds = torch.stack([block.mean() for block in pred_blocks])
+        
         patient_slopes = torch.stack([block[0] for block in slopes_blocks])
         
-        # Loss
-        loss = criterion(patient_preds, patient_slopes)
+        # Loss with optional sample weighting
+        if sample_weights_dict is not None:
+            batch_weights = torch.tensor(
+                [sample_weights_dict.get(pid, 1.0) for pid in patient_ids],
+                dtype=torch.float32, device=device
+            )
+            
+            # Compute loss without reduction
+            # For FocalMSELoss and FocalHuberLoss
+            if isinstance(criterion, (FixedFocalMSELoss)):
+                # These already compute per-sample loss
+                loss_per_sample = criterion.forward_without_reduction(patient_preds, patient_slopes)
+            else:
+                loss_per_sample = (patient_preds - patient_slopes) ** 2  # MSE per sample
+            
+            # Apply weights
+            weighted_loss = (loss_per_sample * batch_weights).mean()
+            loss = weighted_loss
+        else:
+            # Standard unweighted loss
+            loss = criterion(patient_preds, patient_slopes)
+        
         loss = loss / accumulation_steps
         loss.backward()
         
@@ -126,11 +191,15 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip)
         optimizer.step()
         optimizer.zero_grad()
+
+    avg_loss = total_loss / n_patients if n_patients > 0 else 0.0
+    extreme_pct = n_extreme_cases / n_patients * 100 if n_patients > 0 else 0.0
+
     
-    return total_loss / n_patients if n_patients > 0 else 0.0
+    return avg_loss,extreme_pct
 
 
-def validate(model, dataloader, criterion, device, return_predictions=False):
+def validate(model, dataloader, criterion, device, return_predictions=False, use_attention=False):
     """Validate"""
     model.eval()
     total_loss = 0.0
@@ -150,12 +219,30 @@ def validate(model, dataloader, criterion, device, return_predictions=False):
             lengths = batch['lengths'].tolist()
             patient_ids = batch['patient_ids']
             
-            preds_per_slice = model(images)
+            # Forward pass with optional attention
+            if use_attention:
+                preds_per_slice, attention_weights = model(images, return_attention=True)
+                # Reduce spatial attention to per-slice importance
+                if attention_weights.dim() > 1:
+                    attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
+            else:
+                preds_per_slice = model(images)
+                attention_weights = None
             
+            preds_per_slice = preds_per_slice.view(-1)
             pred_blocks = torch.split(preds_per_slice, lengths)
             slopes_blocks = torch.split(slopes, lengths)
             
-            patient_preds = torch.stack([block.mean() for block in pred_blocks])
+            # Attention-weighted aggregation with temperature
+            if attention_weights is not None:
+                attention_blocks = torch.split(attention_weights, lengths)
+                patient_preds = torch.stack([
+                    (pred_block * torch.softmax(attn_block / 0.5, dim=0)).sum()  # temperature = 0.5
+                    for pred_block, attn_block in zip(pred_blocks, attention_blocks)
+                ])
+            else:
+                patient_preds = torch.stack([block.mean() for block in pred_blocks])
+            
             patient_slopes = torch.stack([block[0] for block in slopes_blocks])
             
             loss = criterion(patient_preds, patient_slopes)
@@ -180,7 +267,7 @@ def validate(model, dataloader, criterion, device, return_predictions=False):
     return avg_loss, metrics
 
 
-def predict_fold(model, dataloader, device, slope_scaler):
+def predict_fold(model, dataloader, device, slope_scaler, use_attention=False):
     """Generate predictions for all patients in a fold"""
     model.eval()
     predictions = {}
@@ -194,21 +281,48 @@ def predict_fold(model, dataloader, device, slope_scaler):
             lengths = batch['lengths'].tolist()
             patient_ids = batch['patient_ids']
             
-            preds_per_slice = model(images)
-            
+            # Forward pass with optional attention
+            if use_attention:
+                preds_per_slice, attention_weights = model(images, return_attention=True)
+                # Reduce spatial attention to per-slice importance
+                if attention_weights.dim() > 1:
+                    attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
+            else:
+                preds_per_slice = model(images)
+                attention_weights = None
+
+
+            preds_per_slice = preds_per_slice.view(-1)
             pred_blocks = torch.split(preds_per_slice, lengths)
             
-            for patient_id, pred_block in zip(patient_ids, pred_blocks):
-                # Mean of slices (normalized)
-                pred_mean_norm = pred_block.mean().cpu().item()
+            # Attention-weighted aggregation
+            if attention_weights is not None:
+                attention_blocks = torch.split(attention_weights, lengths)
                 
-                # Denormalize
-                if slope_scaler is not None:
-                    pred_mean = slope_scaler.inverse_transform([[pred_mean_norm]])[0][0]
-                else:
-                    pred_mean = pred_mean_norm
+                for patient_id, pred_block, attn_block in zip(patient_ids, pred_blocks, attention_blocks):
+                    # Attention-weighted mean with temperature
+                    attn_normalized = torch.softmax(attn_block / 0.5, dim=0)  # temperature = 0.5
+                    pred_mean_norm = (pred_block * attn_normalized).sum().cpu().item()
+                    
+                    # Denormalize
+                    if slope_scaler is not None:
+                        pred_mean = slope_scaler.inverse_transform([[pred_mean_norm]])[0][0]
+                    else:
+                        pred_mean = pred_mean_norm
+                    
+                    predictions[patient_id] = pred_mean
+            else:
+                for patient_id, pred_block in zip(patient_ids, pred_blocks):
+                    # Simple mean
+                    pred_mean_norm = pred_block.mean().cpu().item()
                 
-                predictions[patient_id] = pred_mean
+                    # Denormalize
+                    if slope_scaler is not None:
+                        pred_mean = slope_scaler.inverse_transform([[pred_mean_norm]])[0][0]
+                    else:
+                        pred_mean = pred_mean_norm
+                    
+                    predictions[patient_id] = pred_mean
     
     return predictions
 
@@ -244,30 +358,75 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
     
     print(f"Train slices: {len(train_dataset)} | Val slices: {len(val_dataset)}")
     
-    # Dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_sampler=PatientBatchSampler(
+    # Compute inverse frequency weights for training data
+    print(f"\n⚖️  Computing inverse frequency weights...")
+    train_slopes = np.array([patient_data[pid]['slope'] for pid in train_ids])
+    weight_result = compute_exponential_weights(train_slopes, n_bins=6, strength=2.0)
+    sample_weights = weight_result['weights']
+    
+    # Create patient_id -> weight mapping
+    sample_weights_dict = {pid: float(weight) for pid, weight in zip(train_ids, sample_weights)}
+    
+    # Print weight distribution
+    print(f"\n📊 Sample Weight Distribution:")
+    print(f"{'─'*80}")
+    print(f"{'Slope Range':<20} {'Count':<10} {'Weight':<10} {'Samples %':<15}")
+    print(f"{'─'*80}")
+    for bin_info in weight_result['bin_info']:
+        print(f"[{bin_info['range'][0]:6.2f}, {bin_info['range'][1]:6.2f})  "
+              f"{bin_info['count']:>8d}  "
+              f"{bin_info['weight']:>8.3f}  "
+              f"{bin_info['samples_pct']:>12.1f}%")
+    print(f"{'─'*80}")
+    print(f"Weight stats: min={np.min(sample_weights):.3f}, "
+          f"max={np.max(sample_weights):.3f}, mean={np.mean(sample_weights):.3f}\n")
+    
+    # Dataloaders with optional stratified sampling
+    if config['use_stratified_sampling']:
+        print(f"\n🎯 Using stratified sampling with {config['n_strata_bins']} bins")
+        train_sampler = ExtremeOversamplingBatchSampler(
             train_dataset,
             patients_per_batch=best_params['batch_size'],
+            extreme_percentile=25,
+            oversample_factor=4.0
             shuffle=True
-        ),
-        collate_fn=patient_group_collate,
-        num_workers=4,
-        pin_memory=True
-    )
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            collate_fn=patient_group_collate,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        # Analyze batch diversity
+        print("\n📊 Analyzing batch diversity...")
+        _ = analyze_batch_diversity(train_loader, num_batches=5)
+    else:
+        print("No stratified sampling!")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=PatientBatchSampler(
+                train_dataset,
+                patients_per_batch=best_params['batch_size'],
+                shuffle=True
+            ),
+            collate_fn=patient_group_collate,
+            num_workers=4,
+            pin_memory=True
+        )
     
-    val_loader = DataLoader(
-        val_dataset,
-        batch_sampler=PatientBatchSampler(
+        val_loader = DataLoader(
             val_dataset,
-            patients_per_batch=best_params['batch_size'],
-            shuffle=False
-        ),
-        collate_fn=patient_group_collate,
-        num_workers=4,
-        pin_memory=True
-    )
+            batch_sampler=PatientBatchSampler(
+                val_dataset,
+                patients_per_batch=best_params['batch_size'],
+                shuffle=False
+            ),
+            collate_fn=patient_group_collate,
+            num_workers=4,
+            pin_memory=True
+        )
     
     # Model
     model = ImprovedSliceLevelCNN(
@@ -313,7 +472,25 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             gamma=0.5
         )
     
-    criterion = nn.HuberLoss(delta=1.0)  # ✓ Instead of MSELoss
+    # Loss function with focal loss support
+    if config['loss_type'] == 'focal_mse':
+        criterion = FocalMSELoss(gamma=config['focal_gamma'])
+        print(f"✓ Using Focal MSE Loss (gamma={config['focal_gamma']})")
+    elif config['loss_type'] == 'focal_huber':
+        criterion = FocalHuberLoss(delta=config['huber_delta'], gamma=config['focal_gamma'])
+        print(f"✓ Using Focal Huber Loss (delta={config['huber_delta']}, gamma={config['focal_gamma']})")
+    elif config['loss_type'] == 'huber':
+        criterion = nn.HuberLoss(delta=config['huber_delta'])
+        print(f"✓ Using Huber Loss (delta={config['huber_delta']})")
+    elif config['loss_type'] == 'fixed_focal':
+        criterion = FixedFocalMSELoss(gamma=1.5)
+        print(f"✓ Using Fixed Focal Loss (gamma={config['focal_gamma']})")
+    else:
+        criterion = nn.MSELoss()
+        print(f"✓ Using MSE Loss")
+    
+    # Prediction tracker for diagnostics
+    pred_tracker = PredictionTracker()
     
     # Training loop
     best_val_loss = float('inf')
@@ -336,17 +513,25 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             model, train_loader, optimizer, criterion, config['device'],
             gradient_clip=best_params['gradient_clip'],
             accumulation_steps=best_params['accumulation_steps'],
-            use_attention=best_params['use_attention']
+            use_attention=best_params['use_attention'],
+            sample_weights_dict=sample_weights_dict
         )
         
         # Get predictions every 5 epochs for detailed comparison
         return_preds = (epoch + 1) % 5 == 0
         if return_preds:
             val_loss, val_metrics, preds, trues, patient_ids = validate(
-                model, val_loader, criterion, config['device'], return_predictions=True
+                model, val_loader, criterion, config['device'], 
+                return_predictions=True, use_attention=best_params['use_attention']
             )
+            
+            # Update prediction tracker
+            pred_tracker.update(epoch + 1, preds, trues)
         else:
-            val_loss, val_metrics = validate(model, val_loader, criterion, config['device'])
+            val_loss, val_metrics = validate(
+                model, val_loader, criterion, config['device'],
+                use_attention=best_params['use_attention']
+            )
         
         current_lr = optimizer.param_groups[0]['lr']
         
@@ -393,6 +578,17 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
                 error = pred_val - true_val
                 print(f"  {patient_ids[i]:<20} {pred_val:>12.4f}   {true_val:>12.4f}   {error:>12.4f}")
             print(f"  {'─'*76}")
+            
+            # Print diagnostic summary
+            pred_tracker.print_summary(epoch + 1)
+    
+    # Save diagnostic data and plots
+    print(f"\n💾 Saving diagnostics...")
+    diagnostics_path = config['diagnostics_dir'] / f'fold{fold_idx}_tracking.csv'
+    pred_tracker.save(diagnostics_path)
+    
+    plot_path = config['diagnostics_dir'] / f'fold{fold_idx}_diagnostics.png'
+    pred_tracker.plot(plot_path)
     
     # Load best model
     model.load_state_dict(best_model_state)
@@ -436,9 +632,12 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         pin_memory=True
     )
     
-    train_preds = predict_fold(model, train_loader, config['device'], train_dataset.slope_scaler)
-    val_preds = predict_fold(model, val_loader, config['device'], train_dataset.slope_scaler)
-    test_preds = predict_fold(model, test_loader, config['device'], train_dataset.slope_scaler)
+    train_preds = predict_fold(model, train_loader, config['device'], 
+                                train_dataset.slope_scaler, use_attention=best_params['use_attention'])
+    val_preds = predict_fold(model, val_loader, config['device'], 
+                             train_dataset.slope_scaler, use_attention=best_params['use_attention'])
+    test_preds = predict_fold(model, test_loader, config['device'], 
+                              train_dataset.slope_scaler, use_attention=best_params['use_attention'])
     
     predictions = {'train': train_preds, 'val': val_preds, 'test': test_preds}
     

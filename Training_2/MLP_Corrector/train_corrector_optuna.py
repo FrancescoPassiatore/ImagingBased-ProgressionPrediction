@@ -48,7 +48,8 @@ CONFIG = {
     # Paths
     'csv_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv',
     'features_path': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv',
-    'cnn_predictions_path': Path('Training_2/CNN_Training/cnn_predictions_fold0.pkl'),  # From best CNN
+    'npy_dir': r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy',
+    'cnn_predictions_path': Path('Training_2/CNN_Training/predictions_densenet_strat/cnn_predictions_fold0.pkl'),  # From best CNN
     
     # Optuna
     'n_trials': 50,  # Fewer trials than CNN (corrector is simpler)
@@ -137,6 +138,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, gradient_clip=1
         
         # Forward
         predictions = model(features)
+        
         # MSE loss
         mse_loss = criterion(predictions, slopes)
         
@@ -195,7 +197,7 @@ def validate(model, dataloader, criterion, device):
 
 def objective(trial: Trial, config: dict, feature_type: str, 
               train_ids: list, val_ids: list, patient_data: dict, 
-              features_data: dict, cnn_slopes: dict):
+              features_data: dict, cnn_train_slopes: dict, cnn_val_slopes: dict):
     """Optuna objective for one feature type"""
     
     print(f"\n{'='*80}")
@@ -236,23 +238,27 @@ def objective(trial: Trial, config: dict, feature_type: str,
     else:
         n_layers = trial.suggest_int('n_layers', 2, 3)
     
-    # Hidden sizes (adaptive)
+    # Hidden sizes (adaptive using suggest_int for power-of-2 values)
     hidden_sizes = []
     for i in range(n_layers):
         if i == 0:
             # First layer: adaptive to input size
             if input_dim <= 4:
-                size = trial.suggest_categorical(f'hidden_{i}', [32, 64])
+                # Suggest log2 of size: 5->32, 6->64
+                log_size = trial.suggest_int(f'hidden_{i}_log', 5, 6)
             else:
-                size = trial.suggest_categorical(f'hidden_{i}', [64, 128])
+                # Suggest log2 of size: 6->64, 7->128
+                log_size = trial.suggest_int(f'hidden_{i}_log', 6, 7)
+            size = 2 ** log_size
         else:
             # Subsequent layers: at most half of previous
             prev_size = hidden_sizes[-1]
-            max_size = prev_size // 2
-            options = [s for s in [16, 32, 64, 128] if s <= max_size and s >= 8]
-            if not options:
-                options = [8, 16]
-            size = trial.suggest_categorical(f'hidden_{i}', options)
+            max_log = int(np.log2(prev_size // 2))
+            min_log = 3  # minimum 8
+            if max_log < min_log:
+                max_log = min_log
+            log_size = trial.suggest_int(f'hidden_{i}_log', min_log, max_log)
+            size = 2 ** log_size
         
         hidden_sizes.append(size)
     
@@ -283,14 +289,69 @@ def objective(trial: Trial, config: dict, feature_type: str,
     print(f"  gradient_clip: {gradient_clip:.2f}")
     print(f"  l1_lambda: {l1_lambda:.6f}")
     # =========================================================================
-    # CREATE DATASETS
+    # CREATE DATASETS - Filter out patients with NaN features
     # =========================================================================
     
+    # Filter train_ids for NaN features
+    train_ids_clean = []
+    for pid in train_ids:
+        if pid not in features_data:
+            continue
+        pdata = features_data[pid]
+        
+        # Check for NaN in features based on feature_type
+        has_nan = False
+        if feature_type in ['handcrafted', 'full']:
+            from utilities import HAND_FEATURE_ORDER
+            hand_feats = [pdata.get(f, np.nan) for f in HAND_FEATURE_ORDER]
+            if any(np.isnan(hand_feats)):
+                has_nan = True
+        
+        if feature_type in ['demographics', 'full']:
+            if np.isnan(pdata.get('age', np.nan)):
+                has_nan = True
+        
+        if not has_nan:
+            train_ids_clean.append(pid)
+    
+    # Filter val_ids for NaN features
+    val_ids_clean = []
+    for pid in val_ids:
+        if pid not in features_data:
+            continue
+        pdata = features_data[pid]
+        
+        has_nan = False
+        if feature_type in ['handcrafted', 'full']:
+            from utilities import HAND_FEATURE_ORDER
+            hand_feats = [pdata.get(f, np.nan) for f in HAND_FEATURE_ORDER]
+            if any(np.isnan(hand_feats)):
+                has_nan = True
+        
+        if feature_type in ['demographics', 'full']:
+            if np.isnan(pdata.get('age', np.nan)):
+                has_nan = True
+        
+        if not has_nan:
+            val_ids_clean.append(pid)
+    
+    n_train_removed = len(train_ids) - len(train_ids_clean)
+    n_val_removed = len(val_ids) - len(val_ids_clean)
+    
+    if n_train_removed > 0 or n_val_removed > 0:
+        print(f"\n⚠️  Removed patients with NaN features:")
+        print(f"   Train: {n_train_removed} removed ({len(train_ids_clean)} remain)")
+        print(f"   Val: {n_val_removed} removed ({len(val_ids_clean)} remain)")
+    
+    print(f"\nDatasets:")
+    print(f"  Train: {len(train_ids_clean)} patients")
+    print(f"  Val: {len(val_ids_clean)} patients")
+    
     train_dataset = CorrectorDataset(
-        train_ids,
+        train_ids_clean,
         patient_data,
         features_data,
-        cnn_slopes,
+        cnn_train_slopes,
         feature_type=feature_type,
         normalizer=None
     )
@@ -299,17 +360,13 @@ def objective(trial: Trial, config: dict, feature_type: str,
     normalizer = train_dataset.normalizer
     
     val_dataset = CorrectorDataset(
-        val_ids,
+        val_ids_clean,
         patient_data,
         features_data,
-        cnn_slopes,
+        cnn_val_slopes,
         feature_type=feature_type,
         normalizer=normalizer
     )
-    
-    print(f"\nDatasets:")
-    print(f"  Train: {len(train_dataset)} patients")
-    print(f"  Val: {len(val_dataset)} patients")
     
     # Dataloaders
     train_loader = DataLoader(
@@ -349,9 +406,7 @@ def objective(trial: Trial, config: dict, feature_type: str,
         optimizer,
         mode='min',
         factor=0.5,
-        patience=5,
-        verbose=False
-    )
+        patience=5)
     
     criterion = nn.MSELoss()
     
@@ -439,29 +494,25 @@ def main():
     
     import pickle
     with open(CONFIG['cnn_predictions_path'], 'rb') as f:
-        cnn_slopes = pickle.load(f)
+        cnn_predictions_all = pickle.load(f)
     
-    print(f"✓ Loaded CNN predictions for {len(cnn_slopes)} patients")
-    
-    # Load or create K-fold splits (same as CNN)
-    splits_path = Path('Training_2/kfold_splits.pkl')
-    if splits_path.exists():
-        print(f"\n📁 Loading existing K-fold splits from {splits_path}")
-        with open(splits_path, 'rb') as f:
-            splits = pickle.load(f)
+    # Use exact same train/val splits as CNN (no merging, no re-splitting)
+    if isinstance(cnn_predictions_all, dict) and 'train' in cnn_predictions_all:
+        # Structured as {'train': {...}, 'val': {...}, 'test': {...}}
+        cnn_train_slopes = cnn_predictions_all['train']
+        cnn_val_slopes = cnn_predictions_all['val']
+        print(f"✓ Loaded CNN predictions: {len(cnn_train_slopes)} train, {len(cnn_val_slopes)} val")
     else:
-        print("\n🔄 Creating K-fold splits...")
-        splits = create_kfold_splits(
-            list(patient_data.keys()),
-            n_folds=5,
-            random_state=42,
-            save_path=splits_path
-        )
+        raise ValueError("CNN predictions must have 'train' and 'val' keys")
     
-    # Get train/val for optimization fold
+    # Get train/val patient IDs directly from CNN predictions (same split as CNN used)
     fold_idx = CONFIG['fold_for_optimization']
-    train_ids = splits[fold_idx]['train']
-    val_ids = splits[fold_idx]['val']
+    train_ids = list(cnn_train_slopes.keys())
+    val_ids = list(cnn_val_slopes.keys())
+    
+    # Filter to patients that have features available
+    train_ids = [pid for pid in train_ids if pid in patient_data]
+    val_ids = [pid for pid in val_ids if pid in patient_data]
     
     print(f"\nOptimization fold {fold_idx}:")
     print(f"  Train: {len(train_ids)} patients")
@@ -497,7 +548,7 @@ def main():
         study.optimize(
             lambda trial: objective(
                 trial, CONFIG, feature_type, train_ids, val_ids,
-                patient_data, features_data, cnn_slopes
+                patient_data, features_data, cnn_train_slopes, cnn_val_slopes
             ),
             n_trials=CONFIG['n_trials'] - n_completed,
             show_progress_bar=True

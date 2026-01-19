@@ -23,6 +23,8 @@ from typing import Dict, List, Tuple, Optional, Union
 import pickle
 from collections import defaultdict
 import timm
+import matplotlib.pyplot as plt
+from scipy import stats
 
 # =============================================================================
 # CONSTANTS
@@ -333,7 +335,8 @@ class IPFSliceDataset(Dataset):
                 unique_slopes[s['patient_id']] = s['slope']
 
             slopes = np.array(list(unique_slopes.values())).reshape(-1, 1)
-            self.slope_scaler = RobustScaler()  # Changed from StandardScaler - immune to outliers
+            # Use StandardScaler - RobustScaler can cause mode collapse by over-centering
+            self.slope_scaler = StandardScaler()
             self.slope_scaler.fit(slopes)
     
     def __len__(self):
@@ -461,6 +464,103 @@ def patient_group_collate(batch):
         'patient_ids': pid_order,                           # List of patient IDs in order
         'lengths': torch.tensor(lengths, dtype=torch.long)  # Number of slices per patient
     }
+
+class ExtremeOversamplingBatchSampler(Sampler):
+    """
+    Oversample extreme slope cases AGGRESSIVELY
+    
+    Strategy:
+    - Identify extreme cases (top/bottom 25%)
+    - Sample them 3-5x more frequently than middle cases
+    - Ensures every batch has at least 1-2 extreme cases
+    """
+    
+    def __init__(self, dataset, patients_per_batch=4, 
+                 extreme_percentile=25, oversample_factor=4.0, shuffle=True):
+        """
+        Args:
+            dataset: IPFSliceDataset
+            patients_per_batch: batch size in patients
+            extreme_percentile: % to consider extreme (25 = top/bottom 25%)
+            oversample_factor: how much more to sample extremes (4.0 = 4x more)
+            shuffle: whether to shuffle
+        """
+        self.dataset = dataset
+        self.patients_per_batch = patients_per_batch
+        self.shuffle = shuffle
+        
+        # Get patient slopes
+        patient_slopes = {}
+        for pid in dataset.patient_ids:
+            slope = dataset.features_data[
+                dataset.features_data['Patient'] == pid
+            ]['slope'].values[0]
+            patient_slopes[pid] = slope
+        
+        slopes = np.array(list(patient_slopes.values()))
+        patient_ids = np.array(list(patient_slopes.keys()))
+        
+        # Identify extreme cases
+        lower_thresh = np.percentile(slopes, extreme_percentile)
+        upper_thresh = np.percentile(slopes, 100 - extreme_percentile)
+        
+        self.extreme_mask = (slopes <= lower_thresh) | (slopes >= upper_thresh)
+        self.middle_mask = ~self.extreme_mask
+        
+        print(f"\n🎯 Oversampling Configuration:")
+        print(f"  Extreme threshold: [{lower_thresh:.2f}, {upper_thresh:.2f}]")
+        print(f"  Extreme patients: {self.extreme_mask.sum()} ({self.extreme_mask.sum()/len(slopes)*100:.1f}%)")
+        print(f"  Middle patients:  {self.middle_mask.sum()} ({self.middle_mask.sum()/len(slopes)*100:.1f}%)")
+        print(f"  Oversample factor: {oversample_factor}x")
+        
+        # Create sampling probabilities
+        # Extreme cases get high probability, middle cases get low
+        probs = np.ones(len(slopes))
+        probs[self.extreme_mask] *= oversample_factor
+        probs = probs / probs.sum()  # Normalize
+        
+        self.patient_ids = patient_ids
+        self.sampling_probs = probs
+        
+        # Calculate expected extreme cases per batch
+        expected_extreme = patients_per_batch * (self.extreme_mask.sum() * oversample_factor) / probs.sum()
+        print(f"  Expected extreme cases per batch: {expected_extreme:.1f}/{patients_per_batch}")
+    
+    def __iter__(self):
+        """Generate batches with oversampling"""
+        n_patients = len(self.patient_ids)
+        n_batches = (n_patients + self.patients_per_batch - 1) // self.patients_per_batch
+        
+        # Generate more batches to ensure all patients seen at least once
+        n_batches = int(n_batches * 1.5)  # 50% more batches
+        
+        for _ in range(n_batches):
+            # Sample patients according to probabilities
+            # With replacement to allow extreme cases to appear multiple times
+            batch_patients = np.random.choice(
+                self.patient_ids,
+                size=self.patients_per_batch,
+                replace=True,  # Allow duplicates (extreme cases can appear multiple times per epoch)
+                p=self.sampling_probs
+            )
+            
+            # Get slice indices for these patients
+            batch_indices = []
+            for pid in batch_patients:
+                indices = [
+                    i for i, (p, _) in enumerate(self.dataset.slice_info)
+                    if p == pid
+                ]
+                batch_indices.extend(indices)
+            
+            if len(batch_indices) > 0:
+                yield batch_indices
+    
+    def __len__(self):
+        n_patients = len(self.patient_ids)
+        n_batches = (n_patients + self.patients_per_batch - 1) // self.patients_per_batch
+        return int(n_batches * 1.5)
+
 
 
 class CorrectorDataset(Dataset):
@@ -637,8 +737,10 @@ class ImprovedSliceLevelCNN(nn.Module):
     """
     
     def __init__(self, backbone_name: str = 'efficientnet_b0', 
-                 pretrained: bool = True, dropout: float = 0.3):
+                 pretrained: bool = True, dropout: float = 0.3, 
+                 attention_temperature: float = 1.0):
         super().__init__()
+        self.attention_temperature = attention_temperature
         
         # Backbone with features_only=True
         self.backbone = timm.create_model(
@@ -689,8 +791,10 @@ class ImprovedSliceLevelCNN(nn.Module):
         # Global pooling
         pooled = self.global_pool(attended_features).flatten(1)  # (B, C)
         
-        # Prediction
+        # Prediction (with temperature scaling during inference)
         output = self.head(pooled).squeeze(-1)  # (B,)
+        # Scale predictions by temperature to encourage diversity
+        output = output * self.attention_temperature
         
         if return_attention:
             return output, attention_map
@@ -779,6 +883,61 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
         'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
         'mae': mean_absolute_error(y_true, y_pred),
         'r2': r2_score(y_true, y_pred)
+    }
+
+
+def compute_inverse_frequency_weights(slopes: np.ndarray, n_bins: int = 6) -> Dict[str, np.ndarray]:
+    """
+    Compute inverse frequency weights for slope balancing.
+    
+    Assigns higher weights to rare slope values and lower weights to common ones.
+    This forces the model to pay more attention to extreme/rare cases.
+    
+    Args:
+        slopes: Array of slope values for all patients
+        n_bins: Number of bins to divide slope distribution
+    
+    Returns:
+        Dictionary with 'weights' (per-sample weights) and 'bin_info' for diagnostics
+    """
+    # Create histogram bins
+    hist, bin_edges = np.histogram(slopes, bins=n_bins)
+    
+    # Compute inverse frequency weights
+    # Add small epsilon to avoid division by zero
+    bin_weights = 1.0 / (hist + 1e-8)
+    
+    # Apply moderate power to strengthen weights without overfitting
+    # Exponent 1.5 balances: strong enough to break mode collapse, stable for long training
+    # This gives ~150x difference (vs 868x with ^2.0, or 29x with ^1.0)
+    bin_weights = bin_weights ** 1.5
+    
+    # Normalize so mean weight = 1.0 (keeps loss magnitude similar)
+    bin_weights = bin_weights / bin_weights.mean()
+    
+    # Assign each sample to a bin
+    bin_indices = np.digitize(slopes, bin_edges[:-1], right=False) - 1
+    # Clamp to valid range
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+    
+    # Map bin weights to samples
+    sample_weights = bin_weights[bin_indices]
+    
+    # Create diagnostic info
+    bin_info = []
+    for i in range(n_bins):
+        bin_mask = (bin_indices == i)
+        bin_info.append({
+            'range': (float(bin_edges[i]), float(bin_edges[i+1])),
+            'count': int(hist[i]),
+            'weight': float(bin_weights[i]),
+            'samples_pct': float(hist[i] / len(slopes) * 100)
+        })
+    
+    return {
+        'weights': sample_weights,
+        'bin_info': bin_info,
+        'bin_edges': bin_edges
     }
 
 
@@ -882,3 +1041,578 @@ def save_dataset_samples(dataset: IPFSliceDataset, save_dir: str,
         saved_count += 1
     
     print(f"✓ Salvati {saved_count} samples in {save_dir}/")
+
+def predict_fvc_at_week(baseline_fvc: float, slope: float, target_week: float, 
+                       baseline_week: float = 0.0) -> float:
+    """Predict FVC at a specific week using linear model"""
+    weeks_delta = target_week - baseline_week
+    fvc_predicted = baseline_fvc + slope * weeks_delta
+    return fvc_predicted
+
+def compute_fvc52_metrics(true_fvc52: np.ndarray, pred_fvc52: np.ndarray) -> Dict:
+    """Compute metrics for FVC@52 prediction"""
+    mse = mean_squared_error(true_fvc52, pred_fvc52)
+    mae = mean_absolute_error(true_fvc52, pred_fvc52)
+    r2 = r2_score(true_fvc52, pred_fvc52)
+    rmse = np.sqrt(mse)
+    
+    # Percentage errors
+    pct_errors = np.abs(true_fvc52 - pred_fvc52) / true_fvc52 * 100
+    mean_pct_error = np.mean(pct_errors)
+    
+    return {
+        'mse': mse,
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
+        'mean_pct_error': mean_pct_error
+    }
+
+# =============================================================================
+# FOCAL LOSS FOR REGRESSION
+# =============================================================================
+
+class FocalMSELoss(nn.Module):
+    """
+    Focal Loss adapted for regression tasks.
+    
+    Focuses learning on hard examples by down-weighting easy predictions.
+    For regression, "difficulty" is measured by the absolute error.
+    
+    Loss = |y_true - y_pred|^gamma * (y_true - y_pred)^2
+    
+    Args:
+        gamma: Focusing parameter. Higher gamma = more focus on hard examples.
+               gamma=0 → standard MSE
+               gamma=2 → typical focal loss (recommended)
+    """
+    def __init__(self, gamma: float = 1.5):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = 'none'  # For compatibility with weighted training
+    
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            predictions: (batch_size,) predicted values
+            targets: (batch_size,) true values
+        
+        Returns:
+            Scalar loss value
+        """
+        mse_loss = (predictions - targets) ** 2
+        abs_error = torch.abs(predictions - targets)
+        
+        # Normalize abs_error to [0, 1] for stable gradients
+        # Use detach to prevent backprop through normalization
+        abs_error_norm = abs_error / (abs_error.max().detach() + 1e-8)
+        
+        # Focal weight: higher weight for larger errors
+        focal_weight = abs_error_norm ** self.gamma
+        
+        focal_loss = focal_weight * mse_loss
+        
+        return focal_loss.mean()
+    
+    def forward_without_reduction(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass without reduction (for sample weighting).
+        
+        Args:
+            predictions: (batch_size,) predicted values
+            targets: (batch_size,) true values
+        
+        Returns:
+            Per-sample loss: (batch_size,) tensor
+        """
+        mse_loss = (predictions - targets) ** 2
+        abs_error = torch.abs(predictions - targets)
+        
+        # Normalize abs_error
+        abs_error_norm = abs_error / (abs_error.max().detach() + 1e-8)
+        
+        # Focal weight
+        focal_weight = abs_error_norm ** self.gamma
+        
+        focal_loss = focal_weight * mse_loss
+        
+        return focal_loss  # No reduction!
+
+
+class FocalHuberLoss(nn.Module):
+    """
+    Focal Loss with Huber Loss for robustness to outliers.
+    
+    Combines benefits of:
+    - Huber loss: Robust to extreme outliers
+    - Focal loss: Focus on hard examples
+    
+    Args:
+        delta: Huber loss threshold
+        gamma: Focal loss focusing parameter
+    """
+    def __init__(self, delta: float = 1.0, gamma: float = 1.5):
+        super().__init__()
+        self.delta = delta
+        self.gamma = gamma
+        self.huber = nn.HuberLoss(delta=delta, reduction='none')
+        self.reduction = 'none'  # For compatibility with weighted training
+    
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            predictions: (batch_size,) predicted values
+            targets: (batch_size,) true values
+        
+        Returns:
+            Scalar loss value
+        """
+        huber_loss = self.huber(predictions, targets)
+        abs_error = torch.abs(predictions - targets)
+        
+        # Normalize abs_error
+        abs_error_norm = abs_error / (abs_error.max().detach() + 1e-8)
+        
+        # Focal weight
+        focal_weight = abs_error_norm ** self.gamma
+        
+        focal_huber_loss = focal_weight * huber_loss
+        
+        return focal_huber_loss.mean()
+    
+    def forward_without_reduction(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass without reduction (for sample weighting).
+        
+        Args:
+            predictions: (batch_size,) predicted values
+            targets: (batch_size,) true values
+        
+        Returns:
+            Per-sample loss: (batch_size,) tensor
+        """
+        huber_loss = self.huber(predictions, targets)
+        abs_error = torch.abs(predictions - targets)
+        
+        # Normalize abs_error
+        abs_error_norm = abs_error / (abs_error.max().detach() + 1e-8)
+        
+        # Focal weight
+        focal_weight = abs_error_norm ** self.gamma
+        
+        focal_huber_loss = focal_weight * huber_loss
+        
+        return focal_huber_loss  # No reduction!
+
+class FixedFocalMSELoss(nn.Module):
+    """
+    Focal MSE WITHOUT normalization that cancels sample weights
+    
+    Key difference: No division by max(error) that was canceling weights
+    """
+    def __init__(self, gamma=1.5):
+        super().__init__()
+        self.gamma = gamma
+    
+    def forward(self, predictions, targets):
+        """Standard forward with mean reduction"""
+        mse_loss = (predictions - targets) ** 2
+        abs_error = torch.abs(predictions - targets)
+        
+        # NO NORMALIZATION! Let the weights flow naturally
+        focal_weight = abs_error ** self.gamma
+        focal_loss = focal_weight * mse_loss
+        
+        return focal_loss.mean()
+    
+    def forward_without_reduction(self, predictions, targets):
+        """For sample weighting"""
+        mse_loss = (predictions - targets) ** 2
+        abs_error = torch.abs(predictions - targets)
+        
+        # NO NORMALIZATION!
+        focal_weight = abs_error ** self.gamma
+        focal_loss = focal_weight * mse_loss
+        
+        return focal_loss  # No reduction
+
+
+def compute_exponential_weights(slopes: np.ndarray, n_bins: int = 6, 
+                                strength: float = 2.0) -> Dict:
+    """
+    Compute EXPONENTIAL inverse frequency weights (stronger than linear)
+    
+    Args:
+        slopes: Array of slope values
+        n_bins: Number of bins
+        strength: Exponent for weighting (2.0 = quadratic, 3.0 = cubic)
+                 Higher = more aggressive weighting of rare cases
+    
+    Returns:
+        Dict with weights and diagnostics
+    """
+    # Create histogram
+    hist, bin_edges = np.histogram(slopes, bins=n_bins)
+    
+    # Exponential inverse frequency
+    # freq = 50 samples → weight = (1/50)^2 = 0.0004 (if strength=2)
+    # freq = 5 samples → weight = (1/5)^2 = 0.04 (100x more!)
+    bin_weights = (1.0 / (hist + 1e-8)) ** strength
+    
+    # Normalize
+    bin_weights = bin_weights / bin_weights.mean()
+    
+    # Assign weights
+    bin_indices = np.digitize(slopes, bin_edges[:-1], right=False) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+    sample_weights = bin_weights[bin_indices]
+    
+    # Diagnostics
+    bin_info = []
+    for i in range(n_bins):
+        bin_mask = (bin_indices == i)
+        bin_info.append({
+            'range': (float(bin_edges[i]), float(bin_edges[i+1])),
+            'count': int(hist[i]),
+            'weight': float(bin_weights[i]),
+            'samples_pct': float(hist[i] / len(slopes) * 100),
+            'total_contribution': float(bin_weights[i] * hist[i])  # How much this bin contributes to total loss
+        })
+    
+    print(f"\n⚖️  Exponential Sample Weighting (strength={strength}):")
+    print(f"{'─'*90}")
+    print(f"{'Range':<20} {'Count':<8} {'Weight':<12} {'%':<8} {'Loss Contrib':<15}")
+    print(f"{'─'*90}")
+    for info in bin_info:
+        print(f"[{info['range'][0]:6.2f}, {info['range'][1]:6.2f})  "
+              f"{info['count']:>6d}  "
+              f"{info['weight']:>10.3f}  "
+              f"{info['samples_pct']:>6.1f}%  "
+              f"{info['total_contribution']:>13.2f}")
+    print(f"{'─'*90}")
+    print(f"Weight range: {bin_weights.min():.3f} - {bin_weights.max():.3f} "
+          f"(ratio: {bin_weights.max()/bin_weights.min():.1f}x)")
+    
+    return {
+        'weights': sample_weights,
+        'bin_info': bin_info,
+        'bin_edges': bin_edges
+    }
+
+# =============================================================================
+# STRATIFIED BATCH SAMPLER
+# =============================================================================
+
+class StratifiedPatientSampler(Sampler):
+    """
+    Stratified batch sampling to ensure diverse slope ranges in each batch.
+    
+    Strategy:
+    1. Bin slopes into quantiles (e.g., quartiles)
+    2. Sample patients from each bin proportionally
+    3. Ensure each batch has representatives from all bins
+    
+    This forces the model to see diverse progression patterns in every batch,
+    preventing mode collapse to the majority class.
+    
+    Args:
+        dataset: IPFSliceDataset with patient_ids and slopes
+        n_bins: Number of bins for stratification (default: 4 for quartiles)
+        batch_size: Number of patients per batch
+        shuffle: Whether to shuffle within bins
+    """
+    def __init__(self, dataset, n_bins: int = 4, batch_size: int = 8, shuffle: bool = True):
+        self.dataset = dataset
+        self.n_bins = n_bins
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        
+        # Get unique patients and their slopes
+        patient_slopes = {}
+        for slice_info in dataset.slices:
+            patient_id = slice_info['patient_id']
+            slope = slice_info['slope']
+            if patient_id not in patient_slopes:
+                patient_slopes[patient_id] = slope
+        
+        self.patient_ids = list(patient_slopes.keys())
+        self.slopes = np.array([patient_slopes[pid] for pid in self.patient_ids])
+        
+        # Create stratified bins
+        self._create_bins()
+        
+        # Map patient_id to indices in dataset
+        self.patient_to_indices = defaultdict(list)
+        for idx, slice_info in enumerate(dataset.slices):
+            patient_id = slice_info['patient_id']
+            self.patient_to_indices[patient_id].append(idx)
+    
+    def _create_bins(self):
+        """Bin patients by slope quantiles."""
+        # Use quantiles for balanced bins
+        quantiles = np.linspace(0, 100, self.n_bins + 1)
+        bin_edges = np.percentile(self.slopes, quantiles)
+        bin_edges[-1] += 1e-6  # Include maximum value
+        
+        # Assign patients to bins
+        self.bins = [[] for _ in range(self.n_bins)]
+        for patient_id, slope in zip(self.patient_ids, self.slopes):
+            bin_idx = np.digitize(slope, bin_edges) - 1
+            bin_idx = max(0, min(bin_idx, self.n_bins - 1))  # Clamp
+            self.bins[bin_idx].append(patient_id)
+        
+        # Print bin statistics
+        print(f"\n{'='*80}")
+        print(f"Stratified Sampling - Bin Statistics:")
+        print(f"{'='*80}")
+        for i, bin_patients in enumerate(self.bins):
+            bin_slopes = [self.slopes[self.patient_ids.index(pid)] for pid in bin_patients]
+            print(f"Bin {i}: {len(bin_patients):3d} patients | "
+                  f"Slope range: [{min(bin_slopes):6.2f}, {max(bin_slopes):6.2f}] | "
+                  f"Mean: {np.mean(bin_slopes):6.2f}")
+        print(f"{'='*80}\n")
+    
+    def __iter__(self):
+        """Generate batches with stratified sampling."""
+        # Shuffle within bins if requested
+        if self.shuffle:
+            bins = [np.random.permutation(bin_list).tolist() for bin_list in self.bins]
+        else:
+            bins = [list(bin_list) for bin_list in self.bins]
+        
+        # Calculate samples per bin per batch
+        samples_per_bin = max(1, self.batch_size // self.n_bins)
+        
+        # Generate batches
+        while any(len(b) > 0 for b in bins):
+            batch_patients = []
+            
+            # Sample from each bin
+            for bin_list in bins:
+                n_sample = min(samples_per_bin, len(bin_list))
+                if n_sample > 0:
+                    batch_patients.extend(bin_list[:n_sample])
+                    del bin_list[:n_sample]
+            
+            # If batch too small, break
+            if len(batch_patients) < self.batch_size // 2:
+                break
+            
+            # Convert patient IDs to slice indices for this batch
+            batch_indices = []
+            for patient_id in batch_patients:
+                batch_indices.extend(self.patient_to_indices[patient_id])
+            
+            # Yield this batch
+            yield batch_indices
+    
+    def __len__(self):
+        """Approximate number of batches (not exact due to stratification)."""
+        total_patients = len(self.patient_ids)
+        return (total_patients + self.batch_size - 1) // self.batch_size
+
+
+# =============================================================================
+# DIAGNOSTIC UTILITIES
+# =============================================================================
+
+class PredictionTracker:
+    """
+    Track prediction statistics across epochs for diagnostic analysis.
+    
+    Tracks:
+    - Prediction distribution (mean, std, min, max, quantiles)
+    - Prediction variance (diversity metric)
+    - Correlation with true values
+    - Residual statistics
+    """
+    def __init__(self):
+        self.history = {
+            'epoch': [],
+            'pred_mean': [],
+            'pred_std': [],
+            'pred_min': [],
+            'pred_max': [],
+            'pred_q25': [],
+            'pred_q75': [],
+            'true_mean': [],
+            'true_std': [],
+            'correlation': [],
+            'residual_mean': [],
+            'residual_std': [],
+            'mode_collapse_score': []  # Ratio of pred_std / true_std
+        }
+    
+    def update(self, epoch: int, predictions: np.ndarray, targets: np.ndarray):
+        """Update statistics for current epoch."""
+        # Flatten to 1D arrays
+        predictions = np.asarray(predictions).flatten()
+        targets = np.asarray(targets).flatten()
+        
+        self.history['epoch'].append(epoch)
+        
+        # Prediction statistics
+        self.history['pred_mean'].append(np.mean(predictions))
+        self.history['pred_std'].append(np.std(predictions))
+        self.history['pred_min'].append(np.min(predictions))
+        self.history['pred_max'].append(np.max(predictions))
+        self.history['pred_q25'].append(np.percentile(predictions, 25))
+        self.history['pred_q75'].append(np.percentile(predictions, 75))
+        
+        # Target statistics
+        self.history['true_mean'].append(np.mean(targets))
+        self.history['true_std'].append(np.std(targets))
+        
+        # Correlation
+        if len(predictions) > 1 and np.std(predictions) > 1e-8 and np.std(targets) > 1e-8:
+            corr = np.corrcoef(predictions, targets)[0, 1]
+            self.history['correlation'].append(corr if not np.isnan(corr) else 0.0)
+        else:
+            self.history['correlation'].append(0.0)
+        
+        # Residuals
+        residuals = predictions - targets
+        self.history['residual_mean'].append(np.mean(residuals))
+        self.history['residual_std'].append(np.std(residuals))
+        
+        # Mode collapse score: lower is worse (predictions less diverse than truth)
+        mode_collapse = np.std(predictions) / (np.std(targets) + 1e-8)
+        self.history['mode_collapse_score'].append(mode_collapse)
+    
+    def print_summary(self, epoch: int):
+        """Print diagnostic summary for current epoch."""
+        if not self.history['epoch'] or self.history['epoch'][-1] != epoch:
+            return
+        
+        print(f"\n{'='*80}")
+        print(f"📊 Diagnostic Summary - Epoch {epoch}")
+        print(f"{'='*80}")
+        print(f"Predictions: μ={self.history['pred_mean'][-1]:6.2f}, "
+              f"σ={self.history['pred_std'][-1]:5.2f}, "
+              f"range=[{self.history['pred_min'][-1]:6.2f}, {self.history['pred_max'][-1]:6.2f}]")
+        print(f"True values: μ={self.history['true_mean'][-1]:6.2f}, "
+              f"σ={self.history['true_std'][-1]:5.2f}")
+        print(f"Correlation: r={self.history['correlation'][-1]:5.3f}")
+        print(f"Mode collapse score: {self.history['mode_collapse_score'][-1]:5.3f} "
+              f"(1.0 = perfect diversity, <0.5 = severe collapse)")
+        print(f"{'='*80}\n")
+    
+    def save(self, filepath: Path):
+        """Save tracking history to CSV."""
+        df = pd.DataFrame(self.history)
+        df.to_csv(filepath, index=False)
+        print(f"✓ Saved prediction tracking to {filepath}")
+    
+    def plot(self, save_path: Path):
+        """Create diagnostic plots."""
+        if len(self.history['epoch']) == 0:
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        epochs = self.history['epoch']
+        
+        # Plot 1: Prediction vs True statistics
+        ax = axes[0, 0]
+        ax.plot(epochs, self.history['pred_mean'], label='Pred Mean', marker='o')
+        ax.plot(epochs, self.history['true_mean'], label='True Mean', linestyle='--')
+        ax.fill_between(epochs, 
+                        np.array(self.history['pred_mean']) - np.array(self.history['pred_std']),
+                        np.array(self.history['pred_mean']) + np.array(self.history['pred_std']),
+                        alpha=0.3, label='Pred ±σ')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Value')
+        ax.set_title('Prediction Statistics vs Truth')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 2: Prediction range
+        ax = axes[0, 1]
+        ax.plot(epochs, self.history['pred_min'], label='Min', marker='v')
+        ax.plot(epochs, self.history['pred_max'], label='Max', marker='^')
+        ax.fill_between(epochs, self.history['pred_q25'], self.history['pred_q75'],
+                        alpha=0.3, label='IQR (Q25-Q75)')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Prediction Value')
+        ax.set_title('Prediction Range Evolution')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Mode collapse score
+        ax = axes[1, 0]
+        ax.plot(epochs, self.history['mode_collapse_score'], marker='o', color='red')
+        ax.axhline(y=1.0, color='green', linestyle='--', label='Perfect (1.0)')
+        ax.axhline(y=0.5, color='orange', linestyle='--', label='Warning (0.5)')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Score (pred_σ / true_σ)')
+        ax.set_title('Mode Collapse Score')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 4: Correlation
+        ax = axes[1, 1]
+        ax.plot(epochs, self.history['correlation'], marker='o', color='purple')
+        ax.axhline(y=0, color='gray', linestyle='--')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Pearson Correlation')
+        ax.set_title('Prediction-Truth Correlation')
+        ax.set_ylim([-1.1, 1.1])
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved diagnostic plots to {save_path}")
+
+
+def analyze_batch_diversity(dataloader, num_batches: int = 10):
+    """
+    Analyze slope diversity within batches.
+    
+    Useful for validating stratified sampling is working correctly.
+    
+    Args:
+        dataloader: DataLoader to analyze
+        num_batches: Number of batches to check
+    """
+    print(f"\n{'='*80}")
+    print(f"Batch Diversity Analysis")
+    print(f"{'='*80}")
+    
+    batch_stats = []
+    
+    for i, batch in enumerate(dataloader):
+        if i >= num_batches:
+            break
+        
+        if batch is None:
+            continue
+        
+        # Use 'slopes' (plural) from patient_group_collate
+        slopes = batch['slopes'].cpu().numpy()
+        
+        stats_dict = {
+            'batch': i,
+            'n_samples': len(slopes),
+            'mean': np.mean(slopes),
+            'std': np.std(slopes),
+            'min': np.min(slopes),
+            'max': np.max(slopes),
+            'range': np.max(slopes) - np.min(slopes)
+        }
+        batch_stats.append(stats_dict)
+        
+        print(f"Batch {i:2d}: n={len(slopes):3d} | "
+              f"μ={stats_dict['mean']:6.2f}, σ={stats_dict['std']:5.2f} | "
+              f"range=[{stats_dict['min']:6.2f}, {stats_dict['max']:6.2f}] | "
+              f"span={stats_dict['range']:5.2f}")
+    
+    # Summary statistics
+    df = pd.DataFrame(batch_stats)
+    print(f"\n{'-'*80}")
+    print(f"Summary across {len(batch_stats)} batches:")
+    print(f"Average batch std:   {df['std'].mean():5.2f} ± {df['std'].std():5.2f}")
+    print(f"Average batch range: {df['range'].mean():5.2f} ± {df['range'].std():5.2f}")
+    print(f"{'='*80}\n")
+    
+    return df
+

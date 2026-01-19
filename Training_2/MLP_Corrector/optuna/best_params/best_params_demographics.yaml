@@ -1,0 +1,10 @@
+batch_size: 64
+dropout_0: 0.261834958965267
+dropout_1: 0.2306452633557972
+gradient_clip: 1.424194917765122
+hidden_0_log: 6
+hidden_1_log: 5
+lr: 0.00010265273606027705
+n_layers: 2
+use_batch_norm: true
+weight_decay: 4.446168064302126e-06
