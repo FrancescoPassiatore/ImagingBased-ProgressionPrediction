@@ -16,8 +16,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 CONFIG = {
-    'mlp_predictions_dir': Path('Training_2/MLP_Corrector/predictions_densenet'),
-    'results_dir': Path('Training_2/MLP_Corrector/slope_range_results_densenet'),
+    'mlp_predictions_dir': Path('Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
+    'results_dir': Path('Training_2/MLP_Corrector/slope_range_results_effnetb1_oversampling_huber_median'),
     'n_folds': 5,
     'feature_types': ['demographics', 'handcrafted', 'full'],
 }

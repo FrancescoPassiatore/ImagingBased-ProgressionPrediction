@@ -37,15 +37,15 @@ CONFIG = {
     'npy_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Dataset/extracted_npy/extracted_npy',
     'train_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'features_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/patient_features.csv',
-    'cnn_predictions_dir': 'Training_2/CNN_Training/predictions_robust',
-    'best_params_dir': Path('Training_2/MLP_Corrector/best_params'),
-    'results_dir': Path('Training_2/MLP_Corrector/results'),
-    'models_dir': Path('Training_2/MLP_Corrector/models'),
-    'predictions_dir': Path('Training_2/MLP_Corrector/predictions'),
+    'cnn_predictions_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_median',
+    'best_params_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/optuna/best_params'),
+    'results_dir': Path('Training_2/MLP_Corrector/results_effnetb1_oversampling_huber_median'),
+    'models_dir': Path('Training_2/MLP_Corrector/models_effnetb1_oversampling_huber_median'),
+    'predictions_dir': Path('Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
     'feature_types': ['demographics', 'handcrafted', 'full'],
     'n_folds': 5,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'max_epochs': 1000,
+    'max_epochs': 800,
 }
 
 # Create output directories

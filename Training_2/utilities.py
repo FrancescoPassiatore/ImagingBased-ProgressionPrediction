@@ -492,9 +492,8 @@ class ExtremeOversamplingBatchSampler(Sampler):
         # Get patient slopes
         patient_slopes = {}
         for pid in dataset.patient_ids:
-            slope = dataset.features_data[
-                dataset.features_data['Patient'] == pid
-            ]['slope'].values[0]
+            
+            slope = dataset.patient_data[pid]['slope']
             patient_slopes[pid] = slope
         
         slopes = np.array(list(patient_slopes.values()))
@@ -523,7 +522,7 @@ class ExtremeOversamplingBatchSampler(Sampler):
         self.sampling_probs = probs
         
         # Calculate expected extreme cases per batch
-        expected_extreme = patients_per_batch * (self.extreme_mask.sum() * oversample_factor) / probs.sum()
+        expected_extreme = patients_per_batch * probs[self.extreme_mask].sum()
         print(f"  Expected extreme cases per batch: {expected_extreme:.1f}/{patients_per_batch}")
     
     def __iter__(self):
@@ -548,8 +547,8 @@ class ExtremeOversamplingBatchSampler(Sampler):
             batch_indices = []
             for pid in batch_patients:
                 indices = [
-                    i for i, (p, _) in enumerate(self.dataset.slice_info)
-                    if p == pid
+                    i for i, slice_info in enumerate(self.dataset.slices)  # Corrected to use slice_info
+                    if slice_info['patient_id'] == pid  # Access the patient_id in the dictionary
                 ]
                 batch_indices.extend(indices)
             
@@ -793,8 +792,6 @@ class ImprovedSliceLevelCNN(nn.Module):
         
         # Prediction (with temperature scaling during inference)
         output = self.head(pooled).squeeze(-1)  # (B,)
-        # Scale predictions by temperature to encourage diversity
-        output = output * self.attention_temperature
         
         if return_attention:
             return output, attention_map

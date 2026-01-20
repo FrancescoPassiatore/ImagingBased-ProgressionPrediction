@@ -86,8 +86,8 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'results_dir': Path('Training_2/MLP_Corrector/fvc52_results_densenet'),
-    'plots_dir': Path('Training_2/MLP_Corrector/progression_plots_densenet'),
+    'results_dir': Path('Training_2/MLP_Corrector/fvc52_results_effnetb1_oversampling_huber_median'),
+    'plots_dir': Path('Training_2/MLP_Corrector/progression_plots_effnetb1_oversampling_huber_median_decreased_threshold'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',
@@ -96,6 +96,7 @@ CONFIG = {
 }
 
 APPROACHES = {
+    'cnn_only': 'CNN-Only',
     'demographics': 'MLP Demographics',
     'handcrafted': 'MLP Handcrafted',
     'full': 'MLP Full Features'
@@ -194,6 +195,12 @@ def evaluate_approach_progression(approach_key, approach_name, config, ground_tr
             continue
         
         all_predictions_for_save.append(progression_df)
+
+        print("DEBUG CNN")
+        print("Unique predicted_progression:", progression_df['predicted_progression'].unique())
+        print("Unique probability:", np.unique(progression_df['probability'])[:10])
+        print("True progression distribution:", progression_df['true_progression_gt'].value_counts())
+
         
         # Compute metrics for this fold
         fold_metrics = compute_progression_metrics(
@@ -245,17 +252,29 @@ def evaluate_approach_progression(approach_key, approach_name, config, ground_tr
         values = [m[metric_name] for m in fold_metrics_list]
         mean_metrics[metric_name] = np.mean(values)
         std_metrics[metric_name] = np.std(values)
-    
-    # Average confusion matrix across folds (to match per-fold evaluation)
-    mean_cm = np.mean([m['confusion_matrix'] for m in fold_metrics_list], axis=0)
-    mean_metrics['confusion_matrix'] = np.round(mean_cm).astype(int)  # Round to integer for display
-    
+
     # For ROC and PR curves, use combined data across folds
     combined_df = pd.concat(all_predictions_for_save, ignore_index=True)
+
+    y_true = combined_df['true_progression_gt'].values
+    y_pred = combined_df['predicted_progression'].values
+
+    if len(np.unique(y_true)) == 2:
+        cm = confusion_matrix(y_true, y_pred)
+    else:
+        # fallback safe (no crash, but visible)
+        cm = np.array([[0, 0],
+                    [0, 0]])
+
+    mean_metrics['confusion_matrix'] = cm
+
+
+    # ROC / PR
     fpr, tpr, _ = roc_curve(combined_df['true_progression_gt'], combined_df['probability'])
     precision_curve, recall_curve, _ = precision_recall_curve(combined_df['true_progression_gt'], combined_df['probability'])
     mean_metrics['roc_curve'] = (fpr, tpr)
     mean_metrics['pr_curve'] = (precision_curve, recall_curve)
+
     
     # Total counts
     mean_metrics['n_samples'] = int(combined_df['true_progression_gt'].notna().sum())
@@ -296,9 +315,11 @@ def compute_progression_metrics(y_true, y_pred, y_probs):
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    
-    # AUC metrics
-    auc_roc = roc_auc_score(y_true, y_probs)
+    if len(np.unique(y_true)) > 1 and len(np.unique(y_probs)) > 1:
+        auc_roc = roc_auc_score(y_true, y_probs)
+    else:
+        auc_roc = np.nan
+
     ap = average_precision_score(y_true, y_probs)
     
     # ROC and PR curves
@@ -453,13 +474,13 @@ def plot_progression_comparison(all_results, config):
                 continue
             
         ax = fig.add_subplot(gs[row, col])
-        cm = results['metrics']['confusion_matrix']
-        
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, 
-                   cbar=False, square=True,
-                   xticklabels=['Stable', 'Progression'],
-                   yticklabels=['Stable', 'Progression'],
-                   annot_kws={'fontsize': 12, 'fontweight': 'bold'})
+        cm = results['metrics'].get('confusion_matrix', None)
+
+        if cm is None or cm.shape != (2, 2):
+            ax.set_title(f"{results['approach']}\nNo valid confusion matrix", fontsize=11)
+            ax.axis("off")
+            continue
+
         
         ax.set_xlabel('Predicted', fontsize=10)
         ax.set_ylabel('True', fontsize=10)

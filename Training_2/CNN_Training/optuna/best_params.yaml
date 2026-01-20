@@ -4,6 +4,6 @@ dropout: 0.1068368910369956
 gradient_clip: 1.6825062009852865
 lr: 0.00018835689935425297
 optimizer: AdamW
-scheduler: CosineAnnealing
-use_attention: true
-weight_decay: 0.0007250245019598116
+scheduler: ReduceLROnPlateau
+use_attention: false
+weight_decay: 1e-4

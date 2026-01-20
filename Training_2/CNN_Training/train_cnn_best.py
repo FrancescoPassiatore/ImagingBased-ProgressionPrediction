@@ -59,17 +59,17 @@ CONFIG = {
     
     # Training
     'n_folds': 5,
-    'n_epochs': 100,
-    'patience': 20,
+    'n_epochs': 150,
+    'patience': 30,
     'image_size': (224, 224),
     'backbone': 'efficientnet_b1',  # Changed from efficientnet_b0
     'pretrained': True,
     'normalize_slope': False,
     
     # Loss function: 'mse', 'huber', 'focal_mse', 'focal_huber'
-    'loss_type': 'fixed_focal',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
+    'loss_type': 'huber',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
     'focal_gamma': 1.5,  # Reduced from 2.0 for balanced focus
-    'huber_delta': 1.0,  # Huber loss delta
+    'huber_delta': 5.0,  # Huber loss delta
     
     # Stratified sampling
     'use_stratified_sampling': True,
@@ -79,12 +79,16 @@ CONFIG = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
     # Output
-    'checkpoint_dir': Path('Training_2/CNN_Training/final_checkpoints_efficientnet_b1_strat'),
-    'predictions_dir': Path('Training_2/CNN_Training/predictions_efficientnet_b1_strat'),
-    'results_dir': Path('Training_2/CNN_Training/final_results_efficientnet_b1_strat'),
-    'diagnostics_dir': Path('Training_2/CNN_Training/diagnostics_efficientnet_b1_strat')
+    'checkpoint_dir': Path('Training_2/CNN_Training/final_checkpoints_efficientnet_b1_oversampling_huber_mean_sample_weights'),
+    'predictions_dir': Path('Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_mean_sample_weights'),
+    'results_dir': Path('Training_2/CNN_Training/final_results_efficientnet_b1_oversampling_huber_mean_sample_weights'),
+    'diagnostics_dir': Path('Training_2/CNN_Training/diagnostics_efficientnet_b1_oversampling_huber_mean_sample_weights')
 }
 
+def variance_regularization(predictions):
+    pred_std = torch.std(predictions)
+    variance_loss = torch.clamp(1.0 - pred_std, min=0.0)
+    return variance_loss
 
 # Create directories
 for dir_path in [CONFIG['checkpoint_dir'], CONFIG['predictions_dir'], 
@@ -149,32 +153,43 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
                 (pred_block * torch.softmax(attn_block / 0.5, dim=0)).sum()  # temperature = 0.5
                 for pred_block, attn_block in zip(pred_blocks, attention_blocks)
             ])
+            pred_std = torch.std(patient_preds)
+            variance_loss = torch.clamp(1.0 - pred_std, min=0.0)
+
         else:
             # Simple mean (fallback)
             patient_preds = torch.stack([block.mean() for block in pred_blocks])
+            
+
         
         patient_slopes = torch.stack([block[0] for block in slopes_blocks])
-        
-        # Loss with optional sample weighting
+        extreme_in_batch = (torch.abs(patient_slopes) > extreme_threshold).sum().item()
+        n_extreme_cases += extreme_in_batch
+
         if sample_weights_dict is not None:
             batch_weights = torch.tensor(
                 [sample_weights_dict.get(pid, 1.0) for pid in patient_ids],
                 dtype=torch.float32, device=device
             )
             
-            # Compute loss without reduction
-            # For FocalMSELoss and FocalHuberLoss
-            if isinstance(criterion, FixedFocalMSELoss):
-                # These already compute per-sample loss
-                loss_per_sample = criterion.forward_without_reduction(patient_preds, patient_slopes)
+            # Compute per-sample loss
+            if isinstance(criterion, nn.HuberLoss):
+                loss_per_sample = F.huber_loss(
+                    patient_preds, patient_slopes, 
+                    reduction='none', delta=criterion.delta
+                )
+            elif isinstance(criterion, FixedFocalMSELoss):
+                loss_per_sample = criterion.forward_without_reduction(
+                    patient_preds, patient_slopes
+                )
             else:
-                loss_per_sample = (patient_preds - patient_slopes) ** 2  # MSE per sample
+                # MSE fallback
+                loss_per_sample = (patient_preds - patient_slopes) ** 2
             
             # Apply weights
-            weighted_loss = (loss_per_sample * batch_weights).mean()
-            loss = weighted_loss
+            loss = (loss_per_sample * batch_weights).mean()
         else:
-            # Standard unweighted loss
+            # Unweighted loss
             loss = criterion(patient_preds, patient_slopes)
         
         loss = loss / accumulation_steps
@@ -396,6 +411,9 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             oversample_factor=4.0,
             shuffle=True
         )
+
+        weight_result = compute_exponential_weights(train_slopes, n_bins=6, strength=2.0)
+
         train_loader = DataLoader(
             train_dataset,
             batch_sampler=train_sampler,
@@ -404,9 +422,6 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
             pin_memory=True
         )
         
-        # Analyze batch diversity
-        print("\n📊 Analyzing batch diversity...")
-        _ = analyze_batch_diversity(train_loader, num_batches=5)
     else:
         print("No stratified sampling!")
         train_loader = DataLoader(
@@ -466,12 +481,27 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
         dropout=best_params['dropout']
     ).to(config['device'])
     
+    backbone_params = list(model.backbone.parameters())
+
+    head_params = (
+        list(model.spatial_attention.parameters()) +
+        list(model.head.parameters())
+    )
+
     # Optimizer
     if best_params['optimizer'] == 'AdamW':
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=best_params['lr'],
-            weight_decay=best_params['weight_decay']
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": backbone_params,
+                    "lr": 2e-5,           # LOW LR for pretrained backbone
+                },
+                {
+                    "params": head_params,
+                    "lr": 3e-4,           # HIGH LR for attention + head
+                }
+            ],
+            weight_decay=1e-4
         )
     else:
         optimizer = optim.SGD(
@@ -536,9 +566,18 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
     }
     
     print(f"\n🚀 Starting training...\n")
+
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
     
     for epoch in range(config['n_epochs']):
         print(f"Epoch {epoch + 1}/{config['n_epochs']}: ", end='', flush=True)
+
+        if epoch == 2:
+            for p in model.backbone.parameters():
+                p.requires_grad = True
+            print("🔓 Backbone unfrozen")
         
         train_loss , extreme_pct = train_epoch(
             model, train_loader, optimizer, criterion, config['device'],
@@ -564,12 +603,14 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
                 use_attention=best_params['use_attention']
             )
         
-        current_lr = optimizer.param_groups[0]['lr']
+        lr_backbone = optimizer.param_groups[0]['lr']
+        lr_head = optimizer.param_groups[1]['lr']
+
         
         print(
                 f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
                 f"MAE: {val_metrics['mae']:.6f} | RMSE: {val_metrics['rmse']:.6f} | "
-                f"R²: {val_metrics['r2']:.4f} | LR: {current_lr:.2e} | "
+                f"R²: {val_metrics['r2']:.4f} | LR(backbone): {lr_backbone:.2e} | LR(head): {lr_head:.2e} | "
                 f"Ext%: {extreme_pct:.1f}%",
                 end='',
                 flush=True
