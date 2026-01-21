@@ -67,22 +67,22 @@ CONFIG = {
     'normalize_slope': False,
     
     # Loss function: 'mse', 'huber', 'focal_mse', 'focal_huber'
-    'loss_type': 'huber',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
+    'loss_type': 'mse',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
     'focal_gamma': 1.5,  # Reduced from 2.0 for balanced focus
-    'huber_delta': 5.0,  # Huber loss delta
+    'huber_delta': 3.0,  # Huber loss delta
     
     # Stratified sampling
-    'use_stratified_sampling': True,
+    'use_stratified_sampling': False,
     'n_strata_bins': 4,  # Number of slope bins for stratification
     
     # Device
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
     # Output
-    'checkpoint_dir': Path('Training_2/CNN_Training/final_checkpoints_efficientnet_b1_oversampling_huber_mean_sample_weights'),
-    'predictions_dir': Path('Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_mean_sample_weights'),
-    'results_dir': Path('Training_2/CNN_Training/final_results_efficientnet_b1_oversampling_huber_mean_sample_weights'),
-    'diagnostics_dir': Path('Training_2/CNN_Training/diagnostics_efficientnet_b1_oversampling_huber_mean_sample_weights')
+    'checkpoint_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\checkpoints_mse_no_norm'),
+    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_mse_no_norm'),
+    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\final_results_mse_no_norm'),
+    'diagnostics_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\diagnostics_mse_no_norm')
 }
 
 def variance_regularization(predictions):
@@ -567,17 +567,13 @@ def train_fold(fold_idx, train_ids, val_ids, test_ids, patient_data, features_da
     
     print(f"\n🚀 Starting training...\n")
 
-    for p in model.backbone.parameters():
-        p.requires_grad = False
+    
 
     
     for epoch in range(config['n_epochs']):
         print(f"Epoch {epoch + 1}/{config['n_epochs']}: ", end='', flush=True)
 
-        if epoch == 2:
-            for p in model.backbone.parameters():
-                p.requires_grad = True
-            print("🔓 Backbone unfrozen")
+        
         
         train_loss , extreme_pct = train_epoch(
             model, train_loader, optimizer, criterion, config['device'],
@@ -782,7 +778,7 @@ def main():
     print(f"✓ Loaded {len(features_data)} feature records")
     
     # Load K-fold splits
-    splits_path = Path('Training_2/kfold_splits.pkl')
+    splits_path = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\Kfold_cyclic\kfold_cyclic_splits.pkl')
     if splits_path.exists():
         print(f"\n📁 Loading K-fold splits from {splits_path}")
         with open(splits_path, 'rb') as f:

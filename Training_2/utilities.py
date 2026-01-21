@@ -127,6 +127,38 @@ class IPFDataLoader:
         
         return patient_data, features_data
 
+def create_cyclic_5fold_splits(patient_ids, random_state=42,save_path: Optional[Path] = None) :
+    """
+    Each patient:
+      - test exactly once
+      - val exactly once
+      - train in remaining folds
+    """
+    rng = np.random.RandomState(random_state)
+    patient_ids = np.array(patient_ids)
+    rng.shuffle(patient_ids)
+
+    bins = np.array_split(patient_ids, 5)
+    splits = {}
+
+    for fold in range(5):
+        test_bin = fold
+        val_bin = (fold + 1) % 5
+        train_bins = [i for i in range(5) if i not in (test_bin, val_bin)]
+
+        splits[fold] = {
+            "test": bins[test_bin].tolist(),
+            "val": bins[val_bin].tolist(),
+            "train": np.concatenate([bins[i] for i in train_bins]).tolist()
+        }
+
+    if save_path:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, 'wb') as f:
+            pickle.dump(splits, f)
+        print(f"✓ Saved splits to {save_path}")
+
+    return splits
 
 def create_kfold_splits(patient_ids: List[str], n_folds: int = 5, 
                        random_state: int = 42, save_path: Optional[Path] = None) -> Dict:

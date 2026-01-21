@@ -29,9 +29,9 @@ from utilities import IPFDataLoader
 CSV_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv'
 FEATURES_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv'
 NPY_DIR = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy'
-KFOLD_PATH = Path('Training_2/kfold_splits.pkl')
+KFOLD_PATH = Path('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\Kfold_cyclic\kfold_cyclic_splits.pkl')
 
-OUTPUT_DIR = Path('Training_2/CNN_Training/data_analysis')
+OUTPUT_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\analysis')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 EXTREME_THRESHOLD = 10.0
