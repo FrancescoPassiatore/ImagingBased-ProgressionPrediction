@@ -16,8 +16,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 CONFIG = {
-    'mlp_predictions_dir': Path('Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
-    'results_dir': Path('Training_2/MLP_Corrector/slope_range_results_effnetb1_oversampling_huber_median'),
+    'mlp_predictions_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\predictions\\mse'),
+    'results_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\slope_range_results\\mse'),
     'n_folds': 5,
     'feature_types': ['demographics', 'handcrafted', 'full'],
 }
@@ -33,6 +33,7 @@ for feature_type in CONFIG['feature_types']:
     feature_slopes = []
     for fold_idx in range(CONFIG['n_folds']):
         pred_path = CONFIG['mlp_predictions_dir'] / f'{feature_type}_predictions_fold{fold_idx}.pkl'
+        
         if not pred_path.exists():
             print(f"  ⚠️ Predictions not found: {pred_path}")
             continue
@@ -70,8 +71,6 @@ for feature_type in CONFIG['feature_types']:
         plt.tight_layout()
         plt.savefig(CONFIG['results_dir'] / f'{feature_type}_all_folds_slope_hist.png')
         plt.close()
-# Save all slopes to CSV
-
 
 print("\n" + "="*80)
 print("✅ MLP SLOPE RANGE EVALUATION COMPLETE")

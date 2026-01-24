@@ -7,7 +7,8 @@ CRITICAL FIXES:
 2. CNN slope already normalized - don't scale again
 3. Proper feature normalization BEFORE concatenation
 """
-
+import os
+from pyexpat import features
 import numpy as np
 import pandas as pd
 import torch
@@ -16,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Sampler
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score
 import cv2
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
@@ -25,6 +26,10 @@ from collections import defaultdict
 import timm
 import matplotlib.pyplot as plt
 from scipy import stats
+import glob
+import torch.optim as optim
+from tqdm import tqdm
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 # =============================================================================
 # CONSTANTS
@@ -260,11 +265,19 @@ class FeatureNormalizer:
             hand_features_list = []
             for pid in patient_ids:
                 hand_feats = np.array([features_data[pid][f] for f in HAND_FEATURE_ORDER])
+                print(f"DEBUG: Raw hand_feats for {pid}:", [features_data[pid][f] for f in HAND_FEATURE_ORDER])
                 hand_features_list.append(hand_feats)
             
-            hand_features_array = np.array(hand_features_list)
-            self.handcrafted_scaler = StandardScaler()
-            self.handcrafted_scaler.fit(hand_features_array)
+            
+
+            if feature_type in ['handcrafted', 'full']:
+                hand_features_array = np.array(hand_features_list)
+                # Check if all values in a column are the same
+                if np.any(np.std(hand_features_array, axis=0) == 0):
+                    print("WARNING: Some handcrafted features have zero variance (all values are the same).")
+                
+                self.handcrafted_scaler = StandardScaler()
+                self.handcrafted_scaler.fit(hand_features_array)
         
         if feature_type in ['demographics', 'full']:
             # Fit demographic scaler (only age, sex and smoking are categorical)
@@ -279,29 +292,25 @@ class FeatureNormalizer:
     
     def transform(self, patient_id: str, features_data: Dict, 
                   feature_type: str, cnn_slope: float) -> np.ndarray:
-        """
-        Transform features for one patient
-        
-        Returns:
-            Normalized feature vector: [cnn_slope, normalized_features...]
-            Note: cnn_slope is already normalized, we don't touch it!
-        """
-        if feature_type == 'none':
-            return np.array([cnn_slope])
         
         pdata = features_data[patient_id]
-        feature_vector = [cnn_slope]  # Already normalized from CNN
+        feature_vector = [cnn_slope] 
         
         if feature_type in ['handcrafted', 'full']:
-            # Normalize handcrafted features
             hand_feats = np.array([pdata[f] for f in HAND_FEATURE_ORDER])
-            hand_feats_norm = self.handcrafted_scaler.transform(hand_feats.reshape(1, -1))[0]
-            feature_vector.extend(hand_feats_norm)
+            # Reshape for scaler, then flatten back
+            hand_feats_norm = self.handcrafted_scaler.transform(hand_feats.reshape(1, -1)).flatten()
+            feature_vector.extend(hand_feats_norm.tolist())
         
         if feature_type in ['demographics', 'full']:
-            # Normalize age, keep sex and smoking as-is (categorical)
-            age_norm = self.demographic_scaler.transform([[pdata['age']]])[0][0]
-            feature_vector.extend([age_norm, pdata['sex'], pdata['smoking_status']])
+            # IMPORTANT: Transform age using the fitted scaler
+            age_val = np.array([[pdata['age']]])
+            age_norm = self.demographic_scaler.transform(age_val)[0][0]
+            
+            # Append normalized age + raw categorical values
+            feature_vector.append(age_norm)
+            feature_vector.append(float(pdata['sex']))
+            feature_vector.append(float(pdata['smoking_status']))
         
         return np.array(feature_vector)
     
@@ -599,8 +608,7 @@ class CorrectorDataset(Dataset):
     
     def __init__(self, patient_ids: List[str], patient_data: Dict, 
                  features_data: Dict, cnn_slopes: Dict, 
-                 feature_type: str = 'full', 
-                 normalizer: Optional[FeatureNormalizer] = None):
+                 feature_type: str = 'full'):
         """
         Args:
             patient_ids: List of patient IDs
@@ -612,10 +620,9 @@ class CorrectorDataset(Dataset):
         """
         self.patient_ids = patient_ids
         self.patient_data = patient_data
-        self.features_data = features_data
+        self.features_data = features_data #Already normalized
         self.cnn_slopes = cnn_slopes
         self.feature_type = feature_type
-        self.normalizer = normalizer
         
         # Build samples
         self.samples = []
@@ -623,13 +630,27 @@ class CorrectorDataset(Dataset):
             if pid in cnn_slopes and pid in patient_data:
                 self.samples.append(pid)
         
-        # Fit normalizer if needed
-        if self.normalizer is None:
-            self.normalizer = FeatureNormalizer()
-            self.normalizer.fit(self.samples, features_data, feature_type)
     
     def __len__(self):
         return len(self.samples)
+    
+    def _build_feature_vector(self, pid):
+        """Build feature vector from normalized features"""
+        features = []
+        patient_features = self.features_data[pid]
+        
+        # Add handcrafted features (already normalized)
+        if self.feature_type in ['handcrafted', 'full']:
+            for feat_name in HAND_FEATURE_ORDER:
+                features.append(patient_features[feat_name])
+        
+        # Add demographic features (already normalized where needed)
+        if self.feature_type in ['demographics', 'full']:
+            features.append(patient_features['age'])  # Normalized
+            features.append(patient_features['sex'])  # Categorical, not normalized
+            features.append(patient_features['smoking_status'])  # Categorical, not normalized
+        
+        return np.array(features, dtype=np.float32)
     
     def __getitem__(self, idx):
         pid = self.samples[idx]
@@ -640,12 +661,12 @@ class CorrectorDataset(Dataset):
         # Get true slope
         slope_true = self.patient_data[pid]['slope']
         
-        # Get normalized features
-        feature_vector = self.normalizer.transform(pid, self.features_data, 
-                                                   self.feature_type, slope_cnn)
+        feature_vector = self._build_feature_vector(pid)
+        
         
         return {
             'features': torch.tensor(feature_vector, dtype=torch.float32),
+            'slope_cnn': torch.tensor(slope_cnn, dtype=torch.float32),
             'slope': torch.tensor(slope_true, dtype=torch.float32),
             'patient_id': pid
         }
@@ -887,6 +908,31 @@ class SlopeCorrectorFull(ImprovedSlopeCorrector):
     def __init__(self, n_handcrafted=9, n_demographics=3, **kwargs):
         super().__init__(input_dim=1 + n_handcrafted + n_demographics, **kwargs)
 
+
+
+class ResidualSlopeCorrector(nn.Module):
+    def __init__(self, input_dim,hidden_dims,dropout_rates):
+        super().__init__()
+
+        layers = []
+        prev_dim = input_dim
+
+        for h, d in zip(hidden_dims,dropout_rates):
+            layers += [
+                nn.Linear(prev_dim, h),
+                nn.ReLU(),
+                nn.Dropout(d)
+            ]
+            prev_dim = h
+
+        layers.append(nn.Linear(prev_dim, 1))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self,features,slope_cnn):
+        
+        x = torch.cat([features, slope_cnn.unsqueeze(1)], dim=1)
+        correction = self.mlp(x).squeeze(-1)
+        return slope_cnn + correction
 
 # =============================================================================
 # TRAINING UTILITIES
@@ -1645,3 +1691,722 @@ def analyze_batch_diversity(dataloader, num_batches: int = 10):
     
     return df
 
+####################################################################################
+#FVC PREDICTOR
+#####################################################################################
+
+class IPFDataLoaderPredictorProgression:
+    """Loads and prepares data from CSV"""
+
+    def __init__(self, csv_path: str, csv_features_path: str, npy_dir: str):
+        """
+        Args:
+            csv_path: Path to CSV with [Patient, Weeks, FVC, Slice_files, FVC slope, FVC intercept0]
+            csv_features_path: Path to CSV with handcrafted features
+            npy_dir: Directory path for npy image files
+        """
+        self.df = pd.read_csv(csv_path)
+        self.npy_dir = npy_dir
+        self.df_features = pd.read_csv(csv_features_path)
+
+        print(f"✅ Loaded {len(self.df)} records from CSV")
+        print(f"✅ Unique patients in CSV: {self.df['Patient'].nunique()}")
+        print(f"✅ NPY directory: {npy_dir}")
+        print(f"📋 Columns: {self.df.columns.tolist()}")
+
+        # Verify demographic columns exist
+        required_demo_cols = ['Age', 'Sex', 'SmokingStatus']
+        missing_cols = [col for col in required_demo_cols if col not in self.df.columns]
+        if missing_cols:
+            print(f"⚠️  WARNING: Missing demographic columns: {missing_cols}")
+        else:
+            print(f"✅ All demographic columns present: {required_demo_cols}")
+
+        # Verify NPY availability
+        self._verify_npy_availability()
+
+    def _verify_npy_availability(self):
+        """Verify that each patient in the CSV has a folder with .npy files"""
+        patients_csv = set(self.df['Patient'].unique())
+        patients_npy = set([d for d in os.listdir(self.npy_dir)
+                           if os.path.isdir(os.path.join(self.npy_dir, d))])
+
+        missing = patients_csv - patients_npy
+        extra = patients_npy - patients_csv
+
+        if missing:
+            print(f"⚠️  {len(missing)} patients in CSV without NPY folder: {list(missing)[:5]}...")
+        if extra:
+            print(f"ℹ️  {len(extra)} NPY folders not in CSV (will be ignored)")
+
+        available = patients_csv & patients_npy
+        print(f"✅ {len(available)} patients with complete data (CSV + NPY)")
+
+    def get_patient_data(self):
+        """Extract patient data and features with NaN handling"""
+        patient_data = {}
+        features_dict = {}
+        
+        # First pass: collect all features to compute means
+        all_features = {
+            'approx_vol': [], 'avg_num_tissue_pixel': [], 'avg_tissue': [],
+            'avg_tissue_thickness': [], 'avg_tissue_by_total': [], 
+            'avg_tissue_by_lung': [], 'mean': [], 'skew': [], 
+            'kurtosis': [], 'age': []
+        }
+
+        for patient_id in self.df['Patient'].unique():
+            patient_df = self.df[self.df['Patient'] == patient_id]
+            patient_df_features = self.df_features[self.df_features['Patient'] == patient_id]
+            
+            patient_df_sorted = patient_df.sort_values("Weeks")
+            
+            weeks = patient_df_sorted["Weeks"].astype(float).to_numpy()
+            fvc_values = patient_df_sorted["FVC"].astype(float).to_numpy()
+            
+            # Optional: remove NaN/Inf in FVC
+            mask = np.isfinite(weeks) & np.isfinite(fvc_values)
+            weeks = weeks[mask]
+            fvc_values = fvc_values[mask]
+            
+
+            # Check if patient has NPY files
+            patient_npy_folder = os.path.join(self.npy_dir, patient_id)
+            if not os.path.exists(patient_npy_folder):
+                continue
+
+            npy_files = sorted(glob.glob(os.path.join(patient_npy_folder, "*.npy")))
+            if not npy_files:
+                continue
+            
+            # Collect non-NaN values for computing means
+            for key in all_features.keys():
+                if key == 'age':
+                    val = patient_df['Age'].iloc[0]
+                else:
+                    col_map = {
+                        'approx_vol': 'ApproxVol_30_60',
+                        'avg_num_tissue_pixel': 'Avg_NumTissuePixel_30_60',
+                        'avg_tissue': 'Avg_Tissue_30_60',
+                        'avg_tissue_thickness': 'Avg_Tissue_thickness_30_60',
+                        'avg_tissue_by_total': 'Avg_TissueByTotal_30_60',
+                        'avg_tissue_by_lung': 'Avg_TissueByLung_30_60',
+                        'mean': 'Mean_30_60',
+                        'skew': 'Skew_30_60',
+                        'kurtosis': 'Kurtosis_30_60'
+                    }
+                    val = patient_df_features[col_map[key]].iloc[0]
+                
+                if pd.notna(val) and not np.isinf(val):
+                    all_features[key].append(float(val))
+        
+        # Compute means for imputation
+        feature_means = {k: np.mean(v) if len(v) > 0 else 0.0 
+                        for k, v in all_features.items()}
+        
+        print("\n📊 Feature means for NaN imputation:")
+        for k, v in feature_means.items():
+            print(f"   {k}: {v:.4f}")
+        
+        nan_count = 0
+        inf_count = 0
+
+        # Second pass: create feature dictionaries with NaN replacement
+        for patient_id in self.df['Patient'].unique():
+            patient_df = self.df[self.df['Patient'] == patient_id]
+            patient_df_features = self.df_features[self.df_features['Patient'] == patient_id]
+
+            # Check if patient has NPY files
+            patient_npy_folder = os.path.join(self.npy_dir, patient_id)
+            if not os.path.exists(patient_npy_folder):
+                continue
+
+            npy_files = sorted(glob.glob(os.path.join(patient_npy_folder, "*.npy")))
+            if not npy_files:
+                continue
+
+            # Helper function to get feature value with NaN handling
+            def get_safe_value(value, feature_name):
+                nonlocal nan_count, inf_count
+                if pd.isna(value):
+                    nan_count += 1
+                    return feature_means[feature_name]
+                if np.isinf(value):
+                    inf_count += 1
+                    return feature_means[feature_name]
+                return float(value)
+
+            # Extract handcrafted + tabular features with NaN handling
+            features_dict[patient_id] = {
+                'approx_vol': get_safe_value(
+                    patient_df_features['ApproxVol_30_60'].iloc[0], 'approx_vol'),
+                'avg_num_tissue_pixel': get_safe_value(
+                    patient_df_features['Avg_NumTissuePixel_30_60'].iloc[0], 'avg_num_tissue_pixel'),
+                'avg_tissue': get_safe_value(
+                    patient_df_features['Avg_Tissue_30_60'].iloc[0], 'avg_tissue'),
+                'avg_tissue_thickness': get_safe_value(
+                    patient_df_features['Avg_Tissue_thickness_30_60'].iloc[0], 'avg_tissue_thickness'),
+                'avg_tissue_by_total': get_safe_value(
+                    patient_df_features['Avg_TissueByTotal_30_60'].iloc[0], 'avg_tissue_by_total'),
+                'avg_tissue_by_lung': get_safe_value(
+                    patient_df_features['Avg_TissueByLung_30_60'].iloc[0], 'avg_tissue_by_lung'),
+                'mean': get_safe_value(
+                    patient_df_features['Mean_30_60'].iloc[0], 'mean'),
+                'skew': get_safe_value(
+                    patient_df_features['Skew_30_60'].iloc[0], 'skew'),
+                'kurtosis': get_safe_value(
+                    patient_df_features['Kurtosis_30_60'].iloc[0], 'kurtosis'),
+                'age': get_safe_value(
+                    patient_df['Age'].iloc[0], 'age'),
+                'sex': 1.0 if patient_df['Sex'].iloc[0] == 'Male' else 0.0,
+                'smoking_status': 0.0 if patient_df['SmokingStatus'].iloc[0] == 'Never smoked' else 1.0
+            }
+
+            patient_data[patient_id] = {
+                'slices': npy_files,
+                'n_slices': len(npy_files),
+                "weeks":weeks,
+                "fvc_values":fvc_values,
+            }
+        
+        if nan_count > 0:
+            print(f"\n⚠️  Replaced {nan_count} NaN values with feature means")
+        if inf_count > 0:
+            print(f"⚠️  Replaced {inf_count} Inf values with feature means")
+        if nan_count == 0 and inf_count == 0:
+            print(f"\n✅ No NaN or Inf values detected in features")
+
+        return patient_data, features_dict
+
+    def __len__(self):
+        return len(self.df)
+
+class CombinedRegressionLoss(nn.Module):
+    """Combined MAE + MSE loss for robust regression"""
+    def __init__(self, alpha=0.7):
+        super().__init__()
+        self.alpha = alpha  # Weight for MSE (1-alpha for MAE)
+        self.mse = nn.MSELoss()
+        self.mae = nn.L1Loss()
+    
+    def forward(self, pred, target):
+        return self.alpha * self.mse(pred, target) + (1 - self.alpha) * self.mae(pred, target)
+
+
+class PatientMLPDataset(Dataset):
+    """Dataset combining CNN embeddings with handcrafted features for patient-level prediction"""
+    
+    def __init__(
+        self,
+        label_csv,
+        embeddings_dict,
+        handcrafted_dict,
+        patient_list,
+        feature_stats = None,
+        fvc_norm_stats = None
+    ):
+        """
+        Args:
+            label_csv: Path to CSV with patient labels
+            embeddings_dict: Dictionary of patient embeddings from CNN
+            handcrafted_dict: Dictionary of handcrafted features
+            patient_list: List of patient IDs to include
+            feature_stats: Stats for handcrafted features normalization
+            fvc_norm_stats: Dict with 'mean' and 'std' for FVC normalization (optional)
+        """
+        self.df = pd.read_csv(label_csv)
+        self.df = self.df[self.df['Patient'].isin(patient_list)].reset_index(drop=True)
+
+        self.embeddings = embeddings_dict
+        self.handcrafted = handcrafted_dict
+        
+        # Filter out patients without embeddings or features
+        valid_patients = []
+        for pid in self.df['Patient']:
+            if pid in self.embeddings and pid in self.handcrafted:
+                valid_patients.append(pid)
+        
+        self.df = self.df[self.df['Patient'].isin(valid_patients)].reset_index(drop=True)
+        
+        if len(self.df) < len(patient_list):
+            print(f"⚠️  Warning: Only {len(self.df)}/{len(patient_list)} patients have complete data")
+
+        self.feature_stats = feature_stats
+        self.fvc_norm_stats = fvc_norm_stats or {'mean': 0, 'std': 1}  # Default: no normalization
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        pid = row['Patient']
+
+        raw_feats = self.handcrafted[pid]
+        norm_feats = []
+
+        for k in HAND_FEATURE_ORDER:
+            v = raw_feats[k]
+            if k in self.feature_stats:
+                mean = self.feature_stats[k]['mean']
+                std = self.feature_stats[k]['std']
+                norm_feats.append((v - mean) / std)
+            else:
+                # sex, smoking_status
+                norm_feats.append(float(v))
+                
+        x_img = torch.FloatTensor(self.embeddings[pid])
+        x_hand = torch.FloatTensor(norm_feats)
+        
+        # Normalize FVC target
+        fvc_raw = row['fvc_52']
+        fvc_norm = (fvc_raw - self.fvc_norm_stats['mean']) / self.fvc_norm_stats['std']
+        y = torch.FloatTensor([fvc_norm])
+
+        return {
+            'x_img': x_img,
+            'x_hand': x_hand,
+            'y': y,
+            'patient_id': pid
+        }
+
+class SimpleFusionMLP(nn.Module):
+    def __init__(self, img_dim=320, hand_dim=12, hidden=32, dropout=0.5):
+        super().__init__()
+        
+        # Un solo layer per img
+        self.img_fc = nn.Sequential(
+            nn.Linear(img_dim, hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Un solo layer per hand (opzionale)
+        self.hand_fc = nn.Sequential(
+            nn.Linear(hand_dim, hidden//4),  # Molto più piccolo
+            nn.LeakyReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Output diretto (NO fusion layer intermedia!)
+        self.output = nn.Linear(hidden + hidden//4, 1)
+    
+    def forward(self, img_emb, hand_feat):
+        img_out = self.img_fc(img_emb)
+        hand_out = self.hand_fc(hand_feat)
+        fused = torch.cat([img_out, hand_out], dim=1)
+        return self.output(fused)
+        
+class SliceFeatureDataset(Dataset):
+        """Dataset for extracting features from individual CT slices"""
+        
+        def __init__(self, patient_list, patient_data):
+            """
+            Args:
+                patient_list: List of patient IDs
+                patient_data: Dictionary with patient slice paths
+            """
+            self.items = []
+            for pid in patient_list:
+                if pid not in patient_data:
+                    continue
+                for slice_path in patient_data[pid]['slices']:
+                    self.items.append((pid, slice_path))
+
+        def __len__(self):
+            return len(self.items)
+
+        def __getitem__(self, idx):
+            pid, slice_path = self.items[idx]
+
+            # Load image
+            img = np.load(slice_path)
+            
+            # Convert to 3 channels if grayscale
+            if img.ndim == 2:
+                img = np.stack([img, img, img], axis=0)
+            
+            # Ensure correct shape (C, H, W)
+            if img.shape[-1] == 3:  # If (H, W, C)
+                img = np.transpose(img, (2, 0, 1))  # Convert to (C, H, W)
+
+            img = torch.FloatTensor(img)
+
+            return {
+                'image': img,
+                'patient_id': pid
+            }
+            
+    
+    
+
+
+def compute_feature_stats(handcrafted_dict,patient_ids,feature_names):
+    values = {k:[] for k in feature_names}
+
+    for pid in patient_ids:
+        for k in feature_names:
+            v = handcrafted_dict[pid][k]
+            if not np.isnan(v) and not np.isinf(v):
+                values[k].append(v)
+
+    stats = {}
+    for k, v in values.items():
+        v = np.array(v)
+        stats[k] = {
+            'mean': v.mean(),
+            'std': v.std() + 1e-6
+        }
+
+    return stats
+
+
+def train_model(model, train_loader, val_loader, epochs=300, lr=1.7345566642360933e-05, 
+                weight_decay=0.0002669866674274458, grad_clip=0.5, 
+                use_class_weights=False, device='cuda', fvc_norm_stats=None):
+    """Complete training loop with checkpoint support
+    
+    Args:
+        fvc_norm_stats: dict with 'mean' and 'std' for FVC denormalization. 
+                       If provided, uses these to denormalize predictions for display.
+                       Dataset already normalizes targets, so these are just for display.
+    """
+    import os
+
+    # Use provided FVC stats (computed on full training set, applied by dataset)
+    if fvc_norm_stats is None:
+        print("\n⚠️  WARNING: fvc_norm_stats not provided. Predictions will be displayed in normalized space.")
+        fvc_norm_stats = {'mean': 0, 'std': 1}
+    else:
+        print("\n" + "="*80)
+        print("FVC NORMALIZATION STATISTICS (from Main Script)")
+        print("="*80)
+        print(f"✓ FVC Mean: {fvc_norm_stats['mean']:.2f} mL")
+        print(f"✓ FVC Std: {fvc_norm_stats['std']:.2f} mL")
+        print("="*80 + "\n")
+    
+    fvc_mean = fvc_norm_stats['mean']
+    fvc_std = fvc_norm_stats['std']
+
+    # Regression task - use combined loss (MAE + MSE) for robustness
+    criterion = CombinedRegressionLoss(alpha=0.7)  # 70% MSE, 30% MAE
+    
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # Use OneCycleLR for faster convergence
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr * 10,  # Peak learning rate
+        epochs=epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.3,  # 30% for warm-up
+        anneal_strategy='cos',
+        div_factor=25.0,
+        final_div_factor=10000.0
+    )
+    
+    patience = 20  # Slightly increased for OneCycleLR
+    no_improve_count = 0
+    best_mae = float('inf')
+    best_epoch = 0
+    start_epoch = 0
+    history = {
+        'train_loss': [], 'train_mae': [],
+        'val_loss': [], 'val_mae': [], 'val_rmse': [], 'val_r2': []
+    }
+    
+    # =========================================================================
+    # CHECKPOINT MANAGEMENT
+    # =========================================================================
+    checkpoint_path = 'training_checkpoint.pt'
+    best_model_path = 'best_fusion_mlp.pth'
+    
+    # Try to load checkpoint
+    if os.path.exists(checkpoint_path):
+        print("\n" + "="*80)
+        print("LOADING CHECKPOINT")
+        print("="*80)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        scheduler.load_state_dict(checkpoint['scheduler_state'])
+        start_epoch = checkpoint['epoch']
+        best_mae = checkpoint['best_mae']
+        best_epoch = checkpoint['best_epoch']
+        no_improve_count = checkpoint['no_improve_count']
+        history = checkpoint['history']
+        
+        print(f"✓ Checkpoint loaded from epoch {start_epoch}")
+        print(f"✓ Best MAE so far: {best_mae:.4f} (at epoch {best_epoch})")
+        print("="*80 + "\n")
+    else:
+        print("\n" + "="*80)
+        print("NO CHECKPOINT FOUND - STARTING FRESH")
+        print("="*80 + "\n")
+    
+    print("\n" + "="*80)
+    print("TRAINING STARTED")
+    print("="*80)
+    
+    for epoch in range(start_epoch, epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        print("-" * 80)
+        
+        # Train (with OneCycleLR scheduler step inside)
+        train_loss, train_mae = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip)
+        
+        # Validate
+        val_metrics, val_preds, val_labels, val_pids = validate(model, val_loader, criterion, device)
+        
+        # Denormalize predictions for display (normalized values -> original FVC values)
+        val_preds_denorm = np.array(val_preds) * fvc_std + fvc_mean
+        val_labels_denorm = np.array(val_labels) * fvc_std + fvc_mean
+        
+        # OneCycleLR scheduler step - already called in train_epoch (at each batch)
+        # No need to call scheduler.step() here
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Save history
+        history['train_loss'].append(train_loss)
+        history['train_mae'].append(train_mae)
+        history['val_loss'].append(val_metrics['loss'])
+        history['val_mae'].append(val_metrics['mae'])
+        history['val_rmse'].append(val_metrics['rmse'])
+        history['val_r2'].append(val_metrics['r2'])
+        
+        # Denormalize metrics for display
+        val_mae_denorm = val_metrics['mae'] * fvc_std
+        val_rmse_denorm = val_metrics['rmse'] * fvc_std
+        train_mae_denorm = train_mae * fvc_std
+        
+        # Print metrics
+        print(f"\nTrain Loss: {train_loss:.4f} | Train MAE: {train_mae_denorm:.2f} mL [norm: {train_mae:.4f}]")
+        print(f"Val Loss: {val_metrics['loss']:.4f} | Val MAE: {val_mae_denorm:.2f} mL [norm: {val_metrics['mae']:.4f}]")
+        print(f"Val RMSE: {val_rmse_denorm:.2f} mL [norm: {val_metrics['rmse']:.4f}] | Val R²: {val_metrics['r2']:.4f}")
+        print(f"Learning Rate: {current_lr:.6e}")
+        
+        # Print top 3 worst predictions
+        print_top_errors(val_preds_denorm, val_labels_denorm, val_pids, n=3, 
+                        title=f"Epoch {epoch+1} - Top 3 Worst Predictions (Val Set) [DENORMALIZED]")
+        
+        # Save best model
+        if val_metrics['mae'] < best_mae:
+            best_mae = val_metrics['mae']
+            best_mae_denorm = val_mae_denorm
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), best_model_path)
+            print(f"✓ New best model saved! (MAE: {best_mae_denorm:.2f} mL [norm: {best_mae:.4f}])")
+        else:
+            no_improve_count += 1
+        
+        # Save checkpoint every epoch for resuming
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict(),
+            'best_mae': best_mae,
+            'best_epoch': best_epoch,
+            'no_improve_count': no_improve_count,
+            'history': history,
+            'fvc_norm_stats': fvc_norm_stats
+        }
+        torch.save(checkpoint, checkpoint_path)
+        
+        if no_improve_count >= patience:
+            print("Early stopping triggered.")
+            break
+    
+    print("\n" + "="*80)
+    print(f"TRAINING COMPLETED - Best MAE: {best_mae_denorm:.2f} mL [norm: {best_mae:.4f}] at epoch {best_epoch}")
+    print("="*80)
+    print(f"\n📁 Checkpoint saved: {checkpoint_path}")
+    print(f"📁 Best model saved: {best_model_path}")
+    
+    # Clean up checkpoint after successful training
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f"✓ Checkpoint removed after successful completion")
+    
+    return history
+
+
+
+def validate(model, loader, criterion, device):
+    """Validate the model"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    all_pids = []
+    
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Validation"):
+            x_img = batch['x_img'].to(device)
+            x_hand = batch['x_hand'].to(device)
+            y = batch['y'].to(device)
+            
+            # Forward pass
+            logits = model(x_img, x_hand)
+            loss = criterion(logits, y)
+            
+            # Track metrics
+            total_loss += loss.item()
+            preds = logits.cpu().numpy()
+            labels = y.cpu().numpy()
+            
+            all_preds.extend(preds.flatten())
+            all_labels.extend(labels.flatten())
+            all_pids.extend(batch['patient_id'])
+    
+    avg_loss = total_loss / len(loader)
+    mae = mean_absolute_error(all_labels, all_preds)
+    rmse = np.sqrt(mean_squared_error(all_labels, all_preds))
+    r2 = r2_score(all_labels, all_preds)
+
+    metrics = {
+        'loss': avg_loss,
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
+    }
+    
+    return metrics, all_preds, all_labels, all_pids
+
+
+class ImprovedSliceLevelCNNExtractor(nn.Module):
+    """
+    CNN with explicit spatial attention
+    Forces model to learn WHERE to look
+    """
+    def __init__(self, backbone_name='efficientnet_b0', pretrained=True):
+        super().__init__()
+
+        # Backbone
+        self.backbone = timm.create_model(
+            backbone_name,
+            pretrained=pretrained,
+            in_chans=3,
+            num_classes=0,
+            features_only=True  # Return intermediate features
+        )
+
+        # Get feature dimensions
+        # For EfficientNet-B0: [16, 24, 40, 112, 1280]
+        feat_dims = self.backbone.feature_info.channels()
+
+        # Add spatial attention to last feature map
+        self.spatial_attention = SpatialAttentionModule(feat_dims[-1])
+
+        # Global pooling
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        # Prediction head
+        self.head = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(feat_dims[-1], 128),
+            nn.ReLU(),
+            nn.LayerNorm(128),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.LayerNorm(64),
+            nn.Dropout(0.1),
+            nn.Linear(64, 1)
+        )
+        
+    def extract_features(self,x,return_attention=False):
+        
+        features= self.backbone(x)
+        last_feature_map = features[-1]
+        
+        attented_features, attention_map = self.spatial_attention(last_feature_map)
+        
+        pooled = self.global_pool(attented_features).flatten(1) #(B,1280)
+        
+        if return_attention:
+            return pooled,attention_map
+        
+        return pooled
+
+    def forward(self, x, return_attention=False):
+        """
+        Args:
+            x: (B, 3, H, W) input images
+            return_attention: if True, return attention maps for visualization
+        """
+        # Extract features
+        features = self.backbone(x)
+        last_feature_map = features[-1]  # (B, C, h, w)
+
+        # Apply spatial attention
+        attended_features, attention_map = self.spatial_attention(last_feature_map)
+
+        # Global pooling
+        pooled = self.global_pool(attended_features).flatten(1)  # (B, C)
+
+        # Prediction
+        output = self.head(pooled).squeeze(-1)  # (B,)
+
+        if return_attention:
+            return output, attention_map
+        return output
+    
+
+
+def  train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
+    """Train for one epoch - REGRESSION VERSION"""
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    
+    pbar = tqdm(loader, desc="Training")
+    for batch in pbar:
+        x_img = batch['x_img'].to(device)
+        x_hand = batch['x_hand'].to(device)
+        y = batch['y'].to(device)
+        
+        optimizer.zero_grad()
+        
+        # Forward pass
+        logits = model(x_img, x_hand)
+        loss = criterion(logits, y)
+        
+        # Backward pass
+        loss.backward()
+
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+        optimizer.step()
+        
+        # Track metrics
+        total_loss += loss.item()
+        preds = logits.detach().cpu().numpy()  # NO sigmoid per regressione!
+        labels = y.detach().cpu().numpy()
+        
+        all_preds.extend(preds.flatten())
+        all_labels.extend(labels.flatten())
+        
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+    
+    avg_loss = total_loss / len(loader)
+    mae = mean_absolute_error(all_labels, all_preds)  # MAE invece di AUC
+    
+    return avg_loss, mae
+
+
+def print_top_errors(preds, labels, patient_ids, n=5, title="Top Errors"):
+    """Print top N worst predictions"""
+    errors = np.abs(np.array(preds) - np.array(labels))
+    top_indices = np.argsort(errors)[-n:][::-1]
+    
+    print(f"\n{title}")
+    print("-" * 80)
+    for i, idx in enumerate(top_indices, 1):
+        pid = patient_ids[idx]
+        pred = preds[idx]
+        true = labels[idx]
+        error = errors[idx]
+        print(f"{i}. Patient {pid}: Predicted={pred:.2f}, True={true:.2f}, Error={error:.2f} mL")
+    print("-" * 80)

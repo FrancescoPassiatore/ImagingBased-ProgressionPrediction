@@ -16,8 +16,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 CONFIG = {
-    'cnn_predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_mse_no_norm'),
-    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\slope_range_results\mse_no_norm'),
+    'cnn_predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_mse_norm_attention'),
+    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\slope_range_results\mse_norm_attention'),
     'n_folds': 5,
 }
 

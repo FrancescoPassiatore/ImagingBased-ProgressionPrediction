@@ -28,8 +28,11 @@ from utilities import (
     IPFDataLoader,
     CorrectorDataset,
     FeatureNormalizer,
-    ImprovedSlopeCorrector,
-    compute_metrics
+    ResidualSlopeCorrector,
+    compute_metrics,
+    HAND_FEATURE_ORDER,
+    NORMALIZE_DEMO_FEATURES,
+    NORMALIZE_HAND_FEATURES
 )
 
 # Configuration
@@ -37,21 +40,82 @@ CONFIG = {
     'npy_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Dataset/extracted_npy/extracted_npy',
     'train_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'features_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/patient_features.csv',
-    'cnn_predictions_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_median',
+    'cnn_predictions_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/predictions_trainings/predictions_mse',
     'best_params_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/optuna/best_params'),
-    'results_dir': Path('Training_2/MLP_Corrector/results_effnetb1_oversampling_huber_median'),
-    'models_dir': Path('Training_2/MLP_Corrector/models_effnetb1_oversampling_huber_median'),
-    'predictions_dir': Path('Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
-    'feature_types': ['demographics', 'handcrafted', 'full'],
+    'results_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/Cyclic_kfold/results/mse'),
+    'models_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/Cyclic_kfold/models/mse'),
+    'predictions_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/Cyclic_kfold/predictions/mse'),
+    'feature_types': ['handcrafted', 'demographics', 'full'],
     'n_folds': 5,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'max_epochs': 800,
+    'early_stopping_patience': 150,
+    'early_stopping_min_delta': 1e-4,
+
 }
 
 # Create output directories
 CONFIG['results_dir'].mkdir(parents=True, exist_ok=True)
 CONFIG['models_dir'].mkdir(parents=True, exist_ok=True)
 CONFIG['predictions_dir'].mkdir(parents=True, exist_ok=True)
+
+def normalize_features(features_data,train_ids,feature_type):
+    
+    features_to_normalize = []
+    if feature_type in ['handcrafted', 'full']:
+        features_to_normalize.extend(NORMALIZE_HAND_FEATURES)
+    if feature_type in ['demographics', 'full']:
+        features_to_normalize.extend(NORMALIZE_DEMO_FEATURES)
+
+    normalizer_stats = {}
+    for feat_name in features_to_normalize:
+        values = []
+        for pid in train_ids:
+            if pid in features_data and feat_name in features_data[pid]:
+                val = features_data[pid][feat_name]
+                if not np.isnan(val):
+                    values.append(val)
+
+        if len(values) > 0:
+            normalizer_stats[feat_name] = {
+                'mean': np.mean(values),
+                'std': np.std(values) if np.std(values) > 0 else 1.0
+            }
+
+    # Print means and stds before normalization for a few features
+    print("\n[DEBUG] Feature means and stds BEFORE normalization (train set):")
+    for feat_name in features_to_normalize[:5]:
+        if feat_name in normalizer_stats:
+            print(f"  {feat_name}: mean={normalizer_stats[feat_name]['mean']:.4f}, std={normalizer_stats[feat_name]['std']:.4f}")
+
+    # Apply normalization
+    normalized_features_data = {}
+    for pid, feat_dict in features_data.items():
+        normalized_features_data[pid] = feat_dict.copy()
+        for feat_name in features_to_normalize:
+            if feat_name in normalizer_stats and feat_name in feat_dict:
+                original_val = feat_dict[feat_name]
+                if not np.isnan(original_val):
+                    mean = normalizer_stats[feat_name]['mean']
+                    std = normalizer_stats[feat_name]['std']
+                    normalized_features_data[pid][feat_name] = (original_val - mean) / std
+
+    # Print a few normalized values for a few patients and features
+    print("\n[DEBUG] Example normalized feature values (first 3 patients, first 5 features):")
+    shown = 0
+    for pid in train_ids[:3]:
+        if pid in normalized_features_data:
+            print(f"  Patient {pid}:")
+            for feat_name in features_to_normalize[:5]:
+                orig = features_data[pid].get(feat_name, None)
+                norm = normalized_features_data[pid].get(feat_name, None)
+                if orig is not None and norm is not None:
+                    print(f"    {feat_name}: orig={orig:.4f}, norm={norm:.4f}")
+            shown += 1
+        if shown >= 3:
+            break
+
+    return normalized_features_data, normalizer_stats
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, l1_lambda, gradient_clip):
@@ -62,10 +126,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, l1_lambda, grad
     
     for batch in dataloader:
         features = batch['features'].to(device)
+        slope_cnn = batch['slope_cnn'].to(device)
         slopes = batch['slope'].to(device)
         
         # Forward
-        predictions = model(features)
+        predictions = model(features,slope_cnn)
         
         # MSE loss
         mse_loss = criterion(predictions, slopes)
@@ -73,7 +138,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, l1_lambda, grad
         # L1 regularization on first layer
         l1_loss = 0.0
         if l1_lambda > 0:
-            first_layer = model.network[0]
+            first_layer = model.mlp[0]
             l1_loss = l1_lambda * torch.abs(first_layer.weight).sum()
         
         loss = mse_loss + l1_loss
@@ -105,9 +170,10 @@ def validate(model, dataloader, criterion, device):
     with torch.no_grad():
         for batch in dataloader:
             features = batch['features'].to(device)
+            slope_cnn = batch['slope_cnn'].to(device)
             slopes = batch['slope'].to(device)
             
-            predictions = model(features).squeeze()
+            predictions = model(features,slope_cnn).squeeze()
             loss = criterion(predictions, slopes)
             
             total_loss += loss.item() * len(slopes)
@@ -124,8 +190,26 @@ def validate(model, dataloader, criterion, device):
     return avg_loss, metrics, all_patient_ids, all_preds, all_targets
 
 
+def predict(model,dataloader,device):
+    model.eval()
+    all_preds = []
+    all_patient_ids = []
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            features = batch['features'].to(device)
+            slope_cnn = batch['slope_cnn'].to(device)
+            
+            predictions = model(features,slope_cnn).squeeze()
+            
+            all_preds.extend(predictions.cpu().numpy())
+            all_patient_ids.extend(batch['patient_id'])
+    
+    return all_patient_ids, all_preds
+
+
 def train_one_fold(fold_idx, feature_type, params, patient_data, features_data, 
-                   cnn_train_slopes, cnn_val_slopes, device):
+                   cnn_train_slopes, cnn_val_slopes, cnn_test_slopes, device):
     """Train MLP corrector for one fold"""
     
     print(f"\n{'='*80}")
@@ -135,6 +219,7 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
     # Get patient IDs from CNN predictions
     train_ids = list(cnn_train_slopes.keys())
     val_ids = list(cnn_val_slopes.keys())
+    test_ids = list(cnn_test_slopes.keys())
     
     # Filter for NaN in features
     train_ids_clean = []
@@ -176,28 +261,59 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
         
         if not has_nan:
             val_ids_clean.append(pid)
+
+    test_ids_clean = []
+    for pid in test_ids:
+        if pid not in features_data or pid not in patient_data:
+            continue
+        pdata = features_data[pid]
+        
+        has_nan = False
+        if feature_type in ['handcrafted', 'full']:
+            hand_feats = [pdata.get(f, np.nan) for f in HAND_FEATURE_ORDER]
+            if any(np.isnan(hand_feats)):
+                has_nan = True
+        
+        if feature_type in ['demographics', 'full']:
+            if np.isnan(pdata.get('age', np.nan)):
+                has_nan = True
+        
+        if not has_nan:
+            test_ids_clean.append(pid)
     
-    print(f"Patients: Train={len(train_ids_clean)}, Val={len(val_ids_clean)}")
-    
+    print(f"Patients: Train={len(train_ids_clean)}, Val={len(val_ids_clean)}, Test={len(test_ids_clean)}")
+
+    # NORMALIZZAZIONE: calcola statistiche sul train set e applica a tutti
+    print("\n📊 Normalizing features...")
+    normalized_features_data, normalizer_stats = normalize_features(
+        features_data, train_ids_clean, feature_type
+    )
+    print(f"✓ Normalized {len(normalizer_stats)} features")
+
     # Create datasets
     train_dataset = CorrectorDataset(
         train_ids_clean,
         patient_data,
-        features_data,
+        normalized_features_data,
         cnn_train_slopes,
-        feature_type=feature_type,
-        normalizer=None
+        feature_type=feature_type
     )
     
-    normalizer = train_dataset.normalizer
     
     val_dataset = CorrectorDataset(
         val_ids_clean,
         patient_data,
-        features_data,
+        normalized_features_data,
         cnn_val_slopes,
-        feature_type=feature_type,
-        normalizer=normalizer
+        feature_type=feature_type
+    )
+
+    test_dataset = CorrectorDataset(
+        test_ids_clean,
+        patient_data,
+        normalized_features_data,
+        cnn_test_slopes,
+        feature_type=feature_type
     )
     
     # Dataloaders
@@ -210,6 +326,13 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
     
     val_loader = DataLoader(
         val_dataset,
+        batch_size=params['batch_size'],
+        shuffle=False,
+        num_workers=0
+    )
+
+    test_loader = DataLoader(  
+        test_dataset,
         batch_size=params['batch_size'],
         shuffle=False,
         num_workers=0
@@ -244,7 +367,7 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
     print(f"  Gradient clip: {params['gradient_clip']:.2f}")
     
     # Create model (ImprovedSlopeCorrector uses 'hidden_dims' not 'hidden_sizes')
-    model = ImprovedSlopeCorrector(
+    model = ResidualSlopeCorrector(
         input_dim=input_dim,
         hidden_dims=hidden_sizes,
         dropout_rates=dropout_rates
@@ -274,12 +397,12 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
         )
         
         val_loss, val_metrics, _, _, _ = validate(model, val_loader, criterion, device)
-        
-        # Save best model
-        if val_loss < best_val_loss:
+        # Improvement check
+        if val_loss < best_val_loss - CONFIG['early_stopping_min_delta']:
             best_val_loss = val_loss
             best_metrics = val_metrics
-            
+            epochs_no_improve = 0
+
             model_path = CONFIG['models_dir'] / f'{feature_type}_fold{fold_idx}_best.pt'
             torch.save({
                 'epoch': epoch,
@@ -287,9 +410,13 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'metrics': val_metrics,
-                'params': params,
-                'normalizer': normalizer
+                'params': params
             }, model_path)
+
+        else:
+            epochs_no_improve += 1
+        # Save best model
+        
         
         # Print progress every 5 epochs or when best model found
         if (epoch + 1) % 5 == 0 or val_loss == best_val_loss:
@@ -297,6 +424,15 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
                   f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
                   f"MAE: {val_metrics['mae']:.6f} | "
                   f"R²: {val_metrics['r2']:.4f}{' *' if val_loss == best_val_loss else ''}")
+            
+
+        # Early stopping
+        if epochs_no_improve >= CONFIG['early_stopping_patience']:
+            print(
+                f"\n⏹️ Early stopping at epoch {epoch+1} "
+                f"(no improvement for {CONFIG['early_stopping_patience']} epochs)"
+            )
+            break
     print(f"  MAE: {best_metrics['mae']:.6f}")
     print(f"  R²: {best_metrics['r2']:.4f}")
     print(f"  RMSE: {best_metrics['rmse']:.4f}")
@@ -323,15 +459,21 @@ def train_one_fold(fold_idx, feature_type, params, patient_data, features_data,
     _, _, val_patient_ids, val_preds, val_targets = validate(
         model, val_loader, criterion, device
     )
+
+
+    # Get test predictions
+    test_patient_ids, test_preds = predict(model, test_loader, device)
+
     
     # Create predictions dict (patient_id -> prediction)
     train_predictions_dict = {pid: pred for pid, pred in zip(train_patient_ids, train_preds)}
     val_predictions_dict = {pid: pred for pid, pred in zip(val_patient_ids, val_preds)}
-    
+    test_predictions_dict = {pid: pred for pid, pred in zip(test_patient_ids, test_preds)}
     # Save predictions
     predictions = {
         'train': train_predictions_dict,
         'val': val_predictions_dict,
+        'test': test_predictions_dict
     }
     
     pred_path = CONFIG['predictions_dir'] / f'{feature_type}_predictions_fold{fold_idx}.pkl'
@@ -393,12 +535,13 @@ def main():
             
             cnn_train_slopes = cnn_predictions_all['train']
             cnn_val_slopes = cnn_predictions_all['val']
+            cnn_test_slopes = cnn_predictions_all['test']
             
             # Train this fold
             val_loss, val_metrics = train_one_fold(
                 fold_idx, feature_type, params,
                 patient_data, features_data,
-                cnn_train_slopes, cnn_val_slopes,
+                cnn_train_slopes, cnn_val_slopes, cnn_test_slopes,
                 device
             )
             

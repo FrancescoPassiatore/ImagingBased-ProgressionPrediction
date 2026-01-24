@@ -5,5 +5,5 @@ gradient_clip: 1.6825062009852865
 lr: 0.00018835689935425297
 optimizer: AdamW
 scheduler: ReduceLROnPlateau
-use_attention: False
+use_attention: True
 weight_decay: 1e-4

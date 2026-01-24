@@ -2987,5 +2987,3 @@ def patient_group_collate(batch):
         'slice_paths': slice_paths,
         'features': features_dict
     }
-
-

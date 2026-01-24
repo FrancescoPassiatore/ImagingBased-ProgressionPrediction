@@ -86,13 +86,13 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'results_dir': Path('Training_2/MLP_Corrector/fvc52_results_effnetb1_oversampling_huber_median'),
-    'plots_dir': Path('Training_2/MLP_Corrector/progression_plots_effnetb1_oversampling_huber_median_decreased_threshold'),
+    'results_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\fvc52_results\\mse'),
+    'plots_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\progression_plots\\mse_8_threshold'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',
     'n_folds': 5,
-    'progression_threshold': 10  # 10% decline
+    'progression_threshold': 8  # 10% decline
 }
 
 APPROACHES = {
@@ -196,11 +196,6 @@ def evaluate_approach_progression(approach_key, approach_name, config, ground_tr
         
         all_predictions_for_save.append(progression_df)
 
-        print("DEBUG CNN")
-        print("Unique predicted_progression:", progression_df['predicted_progression'].unique())
-        print("Unique probability:", np.unique(progression_df['probability'])[:10])
-        print("True progression distribution:", progression_df['true_progression_gt'].value_counts())
-
         
         # Compute metrics for this fold
         fold_metrics = compute_progression_metrics(
@@ -256,25 +251,33 @@ def evaluate_approach_progression(approach_key, approach_name, config, ground_tr
     # For ROC and PR curves, use combined data across folds
     combined_df = pd.concat(all_predictions_for_save, ignore_index=True)
 
-    y_true = combined_df['true_progression_gt'].values
-    y_pred = combined_df['predicted_progression'].values
+    # This gives the overall confusion matrix across all test folds
+    y_true_combined = combined_df['true_progression_gt'].values.astype(int)
+    y_pred_combined = combined_df['predicted_progression'].values.astype(int)
+    y_prob_combined = combined_df['probability'].values
+    
+    cm_aggregate = confusion_matrix(y_true_combined, y_pred_combined)
+    
+    # Ensure it's 2x2 (handle edge case where one class might be missing)
+    if cm_aggregate.shape != (2, 2):
+        cm_full = np.zeros((2, 2), dtype=int)
+        for i in range(cm_aggregate.shape[0]):
+            for j in range(cm_aggregate.shape[1]):
+                cm_full[i, j] = cm_aggregate[i, j]
+        cm_aggregate = cm_full
+    
+    mean_metrics['confusion_matrix'] = cm_aggregate
 
-    if len(np.unique(y_true)) == 2:
-        cm = confusion_matrix(y_true, y_pred)
+
+    # Compute ROC and PR curves from combined data
+    if len(np.unique(y_true_combined)) > 1 and len(np.unique(y_prob_combined)) > 1:
+        fpr, tpr, _ = roc_curve(y_true_combined, y_prob_combined)
+        precision_curve, recall_curve, _ = precision_recall_curve(y_true_combined, y_prob_combined)
+        mean_metrics['roc_curve'] = (fpr, tpr)
+        mean_metrics['pr_curve'] = (precision_curve, recall_curve)
     else:
-        # fallback safe (no crash, but visible)
-        cm = np.array([[0, 0],
-                    [0, 0]])
-
-    mean_metrics['confusion_matrix'] = cm
-
-
-    # ROC / PR
-    fpr, tpr, _ = roc_curve(combined_df['true_progression_gt'], combined_df['probability'])
-    precision_curve, recall_curve, _ = precision_recall_curve(combined_df['true_progression_gt'], combined_df['probability'])
-    mean_metrics['roc_curve'] = (fpr, tpr)
-    mean_metrics['pr_curve'] = (precision_curve, recall_curve)
-
+        mean_metrics['roc_curve'] = (np.array([0, 1]), np.array([0, 1]))
+        mean_metrics['pr_curve'] = (np.array([0, 1]), np.array([0, 1]))
     
     # Total counts
     mean_metrics['n_samples'] = int(combined_df['true_progression_gt'].notna().sum())
@@ -293,7 +296,15 @@ def evaluate_approach_progression(approach_key, approach_name, config, ground_tr
     print(f"  AUC-ROC:     {mean_metrics['auc_roc']:.3f} ± {std_metrics['auc_roc']:.3f}")
     print(f"  AP:          {mean_metrics['average_precision']:.3f} ± {std_metrics['average_precision']:.3f}")
     print(f"\n  Total patients: {mean_metrics['n_samples']} (Prog: {mean_metrics['n_positive']}, Stable: {mean_metrics['n_negative']})")
-    
+    # ✅ Display aggregate confusion matrix
+    print(f"\n{'='*40}")
+    print("AGGREGATE CONFUSION MATRIX (All Folds)")
+    print(f"{'='*40}")
+    print(f"                  Predicted")
+    print(f"                Stable  Prog")
+    print(f"True  Stable  {cm_aggregate[0,0]:>6d}  {cm_aggregate[0,1]:>5d}")
+    print(f"      Prog    {cm_aggregate[1,0]:>6d}  {cm_aggregate[1,1]:>5d}")
+    print(f"{'='*40}")
     return {
         'approach': approach_name,
         'metrics': mean_metrics,
@@ -461,30 +472,43 @@ def plot_progression_comparison(all_results, config):
     ax3.set_xlim([0, 1])
     ax3.set_ylim([0, 1])
     
-    # 4. Confusion Matrices (2x2 grid in the bottom row)
+    # ✅ FIX: Confusion Matrices with proper heatmap
     for i, (approach_key, results) in enumerate(all_results.items()):
-        # Place in 2x2 grid: row 2, col 0-2
-        if i < 3:
-            row = 2
-            col = i
-        else:
-            row = 2
-            col = i - 3
-            if i >= 6:
-                continue
+        # Only plot first 3 approaches (we have 3 subplot positions)
+        if i >= 3:
+            continue
             
-        ax = fig.add_subplot(gs[row, col])
+        ax = fig.add_subplot(gs[2, i])
         cm = results['metrics'].get('confusion_matrix', None)
-
+        
         if cm is None or cm.shape != (2, 2):
-            ax.set_title(f"{results['approach']}\nNo valid confusion matrix", fontsize=11)
+            ax.text(0.5, 0.5, f"{results['approach']}\nNo valid data", 
+                   ha='center', va='center', fontsize=11)
             ax.axis("off")
             continue
-
         
-        ax.set_xlabel('Predicted', fontsize=10)
-        ax.set_ylabel('True', fontsize=10)
-        ax.set_title(f'{results["approach"]}\nAcc={results["metrics"]["accuracy"]:.3f} (Avg per fold)',
+        # ✅ Create heatmap
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   cbar=False, ax=ax,
+                   xticklabels=['Stable', 'Prog'],
+                   yticklabels=['Stable', 'Prog'],
+                   annot_kws={'fontsize': 14, 'fontweight': 'bold'},
+                   linewidths=2, linecolor='black')
+        
+        # ✅ Add percentage annotations
+        total = cm.sum()
+        for j in range(2):
+            for k in range(2):
+                pct = 100 * cm[j, k] / total
+                ax.text(k + 0.5, j + 0.7, f'({pct:.1f}%)', 
+                       ha='center', va='center', fontsize=9, color='gray')
+        
+        ax.set_xlabel('Predicted', fontsize=10, fontweight='bold')
+        ax.set_ylabel('True', fontsize=10, fontweight='bold')
+        
+        # ✅ Compute accuracy from confusion matrix
+        acc = (cm[0,0] + cm[1,1]) / cm.sum()
+        ax.set_title(f'{results["approach"]}\nAcc={acc:.3f}',
                     fontsize=11, fontweight='bold')
     
     plt.suptitle(f'IPF Progression Prediction Evaluation (≥{config["progression_threshold"]}% FVC Decline)',

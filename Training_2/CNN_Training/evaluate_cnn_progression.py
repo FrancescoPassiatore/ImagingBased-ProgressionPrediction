@@ -88,8 +88,8 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/fvc52_results/mse_no_norm'),
-    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/progression_plots/mse_no_norm'),
+    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/fvc52_results/mse_norm_attention'),
+    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/progression_plots/mse_norm_attention'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',

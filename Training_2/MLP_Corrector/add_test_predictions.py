@@ -21,9 +21,9 @@ CONFIG = {
     'train_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'features_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/patient_features.csv',
     'best_params_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/optuna/best_params'),
-    'models_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/models_effnetb1_oversampling_huber_median'),
-    'predictions_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
-    'splits_path': Path('Training_2/kfold_splits.pkl'),
+    'models_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/Cyclic_kfold/models/mse'),
+    'predictions_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/MLP_Corrector/Cyclic_kfold/predictions/mse'),
+    'splits_path': Path('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\Kfold_cyclic\kfold_cyclic_splits.pkl'),
     'feature_types': ['demographics', 'handcrafted', 'full'],
     'n_folds': 5,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -56,7 +56,7 @@ for feature_type in CONFIG['feature_types']:
         
         print(f"\nFOLD {fold_idx}")
         # Load CNN test slopes for this fold
-        cnn_pred_path = Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_median') / f'cnn_predictions_fold{fold_idx}.pkl'
+        cnn_pred_path = Path('D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_trainings\predictions_mse') / f'cnn_predictions_fold{fold_idx}.pkl'
         with open(cnn_pred_path, 'rb') as f:
             cnn_predictions_all = pickle.load(f)
         cnn_test_slopes = cnn_predictions_all['test']

@@ -1,0 +1,2 @@
+Approach,Accuracy,Precision,Recall,F1-Score,Specificity,AUC-ROC,AP,N,Prog,Stable
+CNN-Only,0.517±0.098,0.691±0.183,0.342±0.200,0.418±0.183,0.761±0.168,0.560±0.114,0.658±0.129,165,96,69

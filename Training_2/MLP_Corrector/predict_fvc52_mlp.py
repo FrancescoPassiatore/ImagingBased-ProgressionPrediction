@@ -27,12 +27,12 @@ CONFIG = {
     'npy_dir': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Dataset/extracted_npy/extracted_npy',
     'train_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'features_csv': 'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training/CNN_Slope_Prediction/patient_features.csv',
-    'mlp_predictions_dir': Path('Training_2/MLP_Corrector/predictions_effnetb1_oversampling_huber_median'),
-    'results_dir': Path('Training_2/MLP_Corrector/fvc52_results_effnetb1_oversampling_huber_median'),
+    'mlp_predictions_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\predictions\\mse'),
+    'results_dir': Path('D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Training_2\\MLP_Corrector\\Cyclic_kfold\\fvc52_results\\mse'),
     'n_folds': 5,
     'feature_types': ['demographics', 'handcrafted', 'full'],
     'target_week': 52,
-    'cnn_predictions_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/predictions_efficientnet_b1_oversampling_huber_median'),
+    'cnn_predictions_dir': Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/predictions_trainings/predictions_mse'),
 }
 
 CONFIG['results_dir'].mkdir(parents=True, exist_ok=True)
@@ -48,7 +48,7 @@ patient_data, features_data = data_loader.get_patient_data()
 print(f"✓ Loaded {len(patient_data)} patients")
 
 # Load K-Fold splits
-splits_path = Path('Training_2/kfold_splits.pkl')
+splits_path = Path('D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/Kfold_cyclic/kfold_cyclic_splits.pkl')
 with open(splits_path, 'rb') as f:
     splits = pickle.load(f)
 print(f"✓ Loaded {len(splits)} folds")
