@@ -27,7 +27,8 @@ from utilities import (
     IPFDataLoaderPredictorProgression, 
     PatientMLPDataset, 
     SimpleFusionMLP, 
-    SliceFeatureDataset, 
+    SliceFeatureDataset,
+    WeightedPatientMLPDataset, 
     compute_feature_stats, 
     train_model,
     validate,
@@ -121,9 +122,9 @@ if __name__ == "__main__":
     KFOLD_SPLITS_PATH = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\Kfold_cyclic\kfold_cyclic_splits.pkl'
     CNN_MODELS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\checkpoints_trainings\checkpoints_mse')
     
-    RESULTS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\results_cyclic_kfold')
-    MODELS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\models_cyclic_kfold')
-    PREDICTIONS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\predictions_cyclic_kfold')
+    RESULTS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\results_cyclic_kfold\sample_weighting')
+    MODELS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\models_cyclic_kfold\sample_weighting')
+    PREDICTIONS_DIR = Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\predictions_cyclic_kfold\sample_weighting')
     
     # Create directories
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -248,7 +249,7 @@ if __name__ == "__main__":
         # =============================================================================
         print(f"\n📁 Creating datasets...")
         
-        train_ds = PatientMLPDataset(
+        train_ds = WeightedPatientMLPDataset(
             label_csv=CSV_PATH_LABEL_52,
             embeddings_dict=patient_embeddings,
             handcrafted_dict=features_data,

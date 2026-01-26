@@ -2087,6 +2087,19 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=1.73455666423609
     fvc_mean = fvc_norm_stats['mean']
     fvc_std = fvc_norm_stats['std']
 
+    use_weights = use_class_weights
+
+    # Check if train_loader has weighted samples
+    try:
+        sample_batch = next(iter(train_loader))
+        if 'weight' in sample_batch:
+            print("\n✓ Detected weighted dataset - sample weights will be applied during training")
+            use_weights = True
+        else:
+            use_weights = False
+    except StopIteration:
+        use_weights = False
+
     # Regression task - use combined loss (MAE + MSE) for robustness
     criterion = CombinedRegressionLoss(alpha=0.7)  # 70% MSE, 30% MAE
     
@@ -2152,7 +2165,7 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=1.73455666423609
         print("-" * 80)
         
         # Train (with OneCycleLR scheduler step inside)
-        train_loss, train_mae = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip)
+        train_loss, train_mae = train_epoch(model, train_loader, criterion, optimizer, device, grad_clip,use_weights=use_weights)
         
         # Validate
         val_metrics, val_preds, val_labels, val_pids = validate(model, val_loader, criterion, device)
@@ -2353,7 +2366,7 @@ class ImprovedSliceLevelCNNExtractor(nn.Module):
     
 
 
-def  train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
+def  train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5, use_weights=False):
     """Train for one epoch - REGRESSION VERSION"""
     model.train()
     total_loss = 0
@@ -2364,16 +2377,26 @@ def  train_epoch(model, loader, criterion, optimizer, device, grad_clip=0.5):
     for batch in pbar:
         x_img = batch['x_img'].to(device)
         x_hand = batch['x_hand'].to(device)
-        y = batch['y'].to(device)
+        y = batch['y'].to(device) 
         
         optimizer.zero_grad()
         
         # Forward pass
         logits = model(x_img, x_hand)
-        loss = criterion(logits, y)
+
+         # Compute loss (with optional weighting)
+        if use_weights and 'weight' in batch:
+            weights = batch['weight'].to(device)
+            # Weighted MSE loss
+            loss_per_sample = torch.nn.functional.mse_loss(logits, y, reduction='none')
+            loss = (loss_per_sample.squeeze() * weights).mean()
+        else:
+            # Standard loss
+            loss = criterion(logits, y)
         
         # Backward pass
         loss.backward()
+        
 
         if grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -2410,3 +2433,283 @@ def print_top_errors(preds, labels, patient_ids, n=5, title="Top Errors"):
         error = errors[idx]
         print(f"{i}. Patient {pid}: Predicted={pred:.2f}, True={true:.2f}, Error={error:.2f} mL")
     print("-" * 80)
+
+
+
+
+#####Versione pesata del dataset
+class WeightedPatientMLPDataset(PatientMLPDataset):
+    """Dataset with sample weights for imbalanced progression"""
+    
+    def __init__(self, label_csv, embeddings_dict, handcrafted_dict, 
+                 patient_list, feature_stats=None, fvc_norm_stats=None,
+                 progression_threshold=10.0):
+        
+        super().__init__(label_csv, embeddings_dict, handcrafted_dict,
+                        patient_list, feature_stats, fvc_norm_stats)
+        
+        # Compute sample weights based on progression
+        self._compute_weights(progression_threshold)
+    
+    def _compute_weights(self, threshold):
+        """Compute sample weights to balance progression/stable"""
+        
+        # Load baseline FVC
+        train_df = pd.read_csv('Training/CNN_Slope_Prediction/train.csv')
+        baseline_fvc_dict = {}
+        for patient_id in train_df['Patient'].unique():
+            patient_weeks = train_df[train_df['Patient'] == patient_id]['Weeks'].values
+            if len(patient_weeks) > 0:
+                earliest_idx = np.argmin(patient_weeks)
+                baseline_fvc_dict[patient_id] = train_df[train_df['Patient'] == patient_id].iloc[earliest_idx]['FVC']
+        
+        # Classify each patient
+        progression_labels = []
+        for _, row in self.df.iterrows():
+            pid = row['Patient']
+            fvc52 = row['fvc_52']
+            
+            if pid not in baseline_fvc_dict:
+                progression_labels.append(0)
+                continue
+            
+            baseline_fvc = baseline_fvc_dict[pid]
+            decline_pct = 100 * (baseline_fvc - fvc52) / baseline_fvc
+            is_progression = 1 if decline_pct >= threshold else 0
+            progression_labels.append(is_progression)
+        
+        progression_labels = np.array(progression_labels)
+        
+        # Compute class weights
+        from sklearn.utils.class_weight import compute_class_weight
+        
+        unique_classes = np.unique(progression_labels)
+        if len(unique_classes) == 1:
+            # All same class - no weighting needed
+            self.sample_weights = torch.ones(len(self.df))
+            print("⚠️  All samples are same class - no weighting applied")
+            return
+        
+        class_weights = compute_class_weight(
+            'balanced',
+            classes=unique_classes,
+            y=progression_labels
+        )
+        
+        class_weights_dict = dict(zip(unique_classes, class_weights))
+        
+        # Assign weight to each sample
+        self.sample_weights = torch.FloatTensor([
+            class_weights_dict[label] for label in progression_labels
+        ])
+        
+        print(f"\n✓ Sample weighting applied:")
+        print(f"   Stable: {np.sum(progression_labels == 0)} samples, weight={class_weights_dict.get(0, 1.0):.3f}")
+        print(f"   Progression: {np.sum(progression_labels == 1)} samples, weight={class_weights_dict.get(1, 1.0):.3f}")
+    
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['weight'] = self.sample_weights[idx]
+        return item
+    
+
+
+
+def analyze_prediction_errors(results, patient_data, features_data, config):
+    """
+    Analizza gli errori di predizione per identificare pattern
+    """
+    print("\n" + "="*80)
+    print("ERROR ANALYSIS")
+    print("="*80)
+    
+    # Get predictions
+    errors_df = results['predictions'].copy()
+    
+    # Compute absolute error
+    errors_df['error_abs'] = abs(errors_df['true_fvc52'] - errors_df['fvc52_predicted'])
+    errors_df['error_pct'] = 100 * errors_df['error_abs'] / errors_df['true_fvc52']
+    
+    # Sort by error
+    errors_df = errors_df.sort_values('error_abs', ascending=False)
+    
+    # Print top 20 worst predictions
+    print("\n📉 TOP 20 WORST PREDICTIONS (by absolute error):")
+    print("-" * 120)
+    
+    top_errors = errors_df.head(20)[['patient_id', 'baseline_fvc', 'true_fvc52', 
+                                      'fvc52_predicted', 'error_abs', 'error_pct',
+                                      'true_progression_gt', 'predicted_progression']]
+    
+    print(top_errors.to_string(index=False))
+    
+    # Add patient characteristics
+    print("\n" + "="*80)
+    print("CHARACTERISTICS OF HIGH-ERROR PATIENTS")
+    print("="*80)
+    
+    # Extract features for high-error patients
+    high_error_pids = errors_df.head(20)['patient_id'].tolist()
+    
+    characteristics = []
+    for pid in high_error_pids:
+        if pid not in patient_data or pid not in features_data:
+            continue
+        
+        pdata = patient_data[pid]
+        fdata = features_data[pid]
+        
+        characteristics.append({
+            'patient_id': pid,
+            'age': fdata.get('age', np.nan),
+            'sex': 'Male' if fdata.get('sex', 0) == 1 else 'Female',
+            'smoking': 'Yes' if fdata.get('smoking_status', 0) == 1 else 'No',
+            'n_measurements': len(pdata['fvc_values']),
+            'fvc_slope': pdata.get('slope', np.nan),
+            'tissue_by_lung': fdata.get('avg_tissue_by_lung', np.nan)
+        })
+    
+    char_df = pd.DataFrame(characteristics)
+    
+    if len(char_df) > 0:
+        print("\nPatient Characteristics (Top 20 Errors):")
+        print(char_df.to_string(index=False))
+        
+        # Summary statistics
+        print("\n" + "-"*80)
+        print("SUMMARY STATISTICS:")
+        print(f"  Age: {char_df['age'].mean():.1f} ± {char_df['age'].std():.1f}")
+        print(f"  Sex: {char_df['sex'].value_counts().to_dict()}")
+        print(f"  Smoking: {char_df['smoking'].value_counts().to_dict()}")
+        print(f"  N measurements: {char_df['n_measurements'].mean():.1f} ± {char_df['n_measurements'].std():.1f}")
+        print(f"  FVC slope: {char_df['fvc_slope'].mean():.2f} ± {char_df['fvc_slope'].std():.2f}")
+    
+    # Compare high-error vs low-error groups
+    print("\n" + "="*80)
+    print("COMPARISON: HIGH-ERROR vs LOW-ERROR PATIENTS")
+    print("="*80)
+    
+    # Low error group (bottom 20)
+    low_error_pids = errors_df.tail(20)['patient_id'].tolist()
+    
+    low_characteristics = []
+    for pid in low_error_pids:
+        if pid not in patient_data or pid not in features_data:
+            continue
+        
+        pdata = patient_data[pid]
+        fdata = features_data[pid]
+        
+        low_characteristics.append({
+            'age': fdata.get('age', np.nan),
+            'n_measurements': len(pdata['fvc_values']),
+            'fvc_slope': pdata.get('slope', np.nan),
+        })
+    
+    low_char_df = pd.DataFrame(low_characteristics)
+    
+    if len(char_df) > 0 and len(low_char_df) > 0:
+        print("\nHigh-Error Group:")
+        print(f"  Age: {char_df['age'].mean():.1f} ± {char_df['age'].std():.1f}")
+        print(f"  N measurements: {char_df['n_measurements'].mean():.1f} ± {char_df['n_measurements'].std():.1f}")
+        print(f"  FVC slope: {char_df['fvc_slope'].mean():.2f} ± {char_df['fvc_slope'].std():.2f}")
+        
+        print("\nLow-Error Group:")
+        print(f"  Age: {low_char_df['age'].mean():.1f} ± {low_char_df['age'].std():.1f}")
+        print(f"  N measurements: {low_char_df['n_measurements'].mean():.1f} ± {low_char_df['n_measurements'].std():.1f}")
+        print(f"  FVC slope: {low_char_df['fvc_slope'].mean():.2f} ± {low_char_df['fvc_slope'].std():.2f}")
+        
+        # Statistical tests
+        from scipy import stats
+        
+        print("\n" + "-"*80)
+        print("STATISTICAL SIGNIFICANCE:")
+        
+        # Age
+        t_stat, p_val = stats.ttest_ind(char_df['age'].dropna(), 
+                                        low_char_df['age'].dropna())
+        print(f"  Age difference: t={t_stat:.2f}, p={p_val:.4f} {'***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'}")
+        
+        # N measurements
+        t_stat, p_val = stats.ttest_ind(char_df['n_measurements'].dropna(), 
+                                        low_char_df['n_measurements'].dropna())
+        print(f"  N measurements: t={t_stat:.2f}, p={p_val:.4f} {'***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'}")
+        
+        # FVC slope
+        t_stat, p_val = stats.ttest_ind(char_df['fvc_slope'].dropna(), 
+                                        low_char_df['fvc_slope'].dropna())
+        print(f"  FVC slope: t={t_stat:.2f}, p={p_val:.4f} {'***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'}")
+    
+    # Save error analysis
+    errors_path = config['results_dir'] / 'error_analysis.csv'
+    errors_df.to_csv(errors_path, index=False)
+    print(f"\n✓ Saved error analysis to: {errors_path}")
+    
+    # Plot error distribution
+    plot_error_distribution(errors_df, config)
+    
+    return errors_df
+
+
+def plot_error_distribution(errors_df, config):
+    """Plot error distribution"""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 1. Error distribution
+    ax = axes[0, 0]
+    ax.hist(errors_df['error_abs'], bins=30, color='#3498db', alpha=0.7, edgecolor='black')
+    ax.set_xlabel('Absolute Error (mL)', fontsize=11)
+    ax.set_ylabel('Frequency', fontsize=11)
+    ax.set_title('Distribution of Prediction Errors', fontsize=12, fontweight='bold')
+    ax.axvline(errors_df['error_abs'].median(), color='red', linestyle='--', 
+               label=f'Median: {errors_df["error_abs"].median():.1f} mL')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Error vs Baseline FVC
+    ax = axes[0, 1]
+    ax.scatter(errors_df['baseline_fvc'], errors_df['error_abs'], 
+              alpha=0.5, color='#e74c3c')
+    ax.set_xlabel('Baseline FVC (mL)', fontsize=11)
+    ax.set_ylabel('Absolute Error (mL)', fontsize=11)
+    ax.set_title('Error vs Baseline FVC', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Add trend line
+    z = np.polyfit(errors_df['baseline_fvc'], errors_df['error_abs'], 1)
+    p = np.poly1d(z)
+    x_trend = np.linspace(errors_df['baseline_fvc'].min(), 
+                         errors_df['baseline_fvc'].max(), 100)
+    ax.plot(x_trend, p(x_trend), "r--", alpha=0.8, linewidth=2)
+    
+    # 3. Error by True Progression Status
+    ax = axes[1, 0]
+    stable_errors = errors_df[errors_df['true_progression_gt'] == 0]['error_abs']
+    prog_errors = errors_df[errors_df['true_progression_gt'] == 1]['error_abs']
+    
+    ax.boxplot([stable_errors, prog_errors], labels=['Stable', 'Progression'])
+    ax.set_ylabel('Absolute Error (mL)', fontsize=11)
+    ax.set_title('Error by True Progression Status', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Predicted vs True FVC@52
+    ax = axes[1, 1]
+    ax.scatter(errors_df['true_fvc52'], errors_df['fvc52_predicted'], 
+              alpha=0.5, color='#2ecc71')
+    ax.plot([errors_df['true_fvc52'].min(), errors_df['true_fvc52'].max()],
+           [errors_df['true_fvc52'].min(), errors_df['true_fvc52'].max()],
+           'r--', linewidth=2, label='Perfect prediction')
+    ax.set_xlabel('True FVC@52 (mL)', fontsize=11)
+    ax.set_ylabel('Predicted FVC@52 (mL)', fontsize=11)
+    ax.set_title('Predicted vs True FVC@52', fontsize=12, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.suptitle('Prediction Error Analysis', fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    
+    save_path = config['plots_dir'] / 'error_analysis.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved error analysis plot: {save_path}")
+    plt.close()
