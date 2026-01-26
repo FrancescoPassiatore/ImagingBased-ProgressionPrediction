@@ -88,8 +88,8 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/fvc52_results/mse_norm_attention'),
-    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/progression_plots/mse_norm_attention'),
+    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/fvc52_results/mse'),
+    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/CNN_Training/Cyclic_kfold/progression_plots/mse_cal'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',
@@ -513,8 +513,9 @@ def classify_progression_from_fvc52(predictions_df, threshold_percent=10.0):
         # Classification based on predicted FVC@52
         predicted_progression = decline_pred_pct >= threshold_percent
         
-        # Probability (normalized decline percentage to [0, 1])
-        probability = max(0.0, min(decline_pred_pct / threshold_percent, 1.0))
+        
+        k = 0.3  # controls softness of transition
+        probability = 1 / (1 + np.exp(-(decline_pred_pct - threshold_percent) / k))
         
         results.append({
             'patient_id': row['patient_id'],

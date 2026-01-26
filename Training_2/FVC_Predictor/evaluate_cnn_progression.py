@@ -99,9 +99,9 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\predictions_cyclic_kfold'),
-    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_results/direct'),
-    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_plots/direct'),
+    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\predictions_cyclic_kfold\sample_weighting'),
+    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_results/sample_weighting_calib'),
+    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_plots/sample_weighting_calib'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',
@@ -196,7 +196,10 @@ def classify_progression_from_fvc52(predictions_df, threshold_percent=10.0):
 
         predicted_progression = decline_pred_pct >= threshold_percent
 
-        probability = max(0.0, min(decline_pred_pct / threshold_percent, 1.0))
+
+        k = 0.3  # controls softness of transition
+        probability = 1 / (1 + np.exp(-(decline_pred_pct - threshold_percent) / k))
+
 
         results.append({
             'patient_id': patient_id,
@@ -267,7 +270,7 @@ def evaluate_approach_progression(config, ground_truth_labels):
         fold_preds = all_folds_predictions[fold_key]
         
         # Get test predictions for this fold
-        test_preds_dict = fold_preds['test']  # {patient_id: predicted_fvc52}
+        test_preds_dict = fold_preds['test']['fvc52']  # {patient_id: predicted_fvc52}
         
         if len(test_preds_dict) == 0:
             print(f"⚠️  Fold {fold_idx}: No test predictions")
