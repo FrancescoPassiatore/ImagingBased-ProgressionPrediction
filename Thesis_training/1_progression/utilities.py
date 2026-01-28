@@ -1,4 +1,63 @@
+import os
+from pyexpat import features
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, Sampler
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, f1_score
+import cv2
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Union
+import pickle
+from collections import defaultdict
+import timm
+import matplotlib.pyplot as plt
+from scipy import stats
+import glob
+import torch.optim as optim
+from tqdm import tqdm
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+HAND_FEATURE_ORDER = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis'
+]
+
+DEMOGRAPHIC_FEATURES = [
+    'age',
+    'sex',
+    'smoking_status'
+]
+
+# Features that need normalization (continuous variables)
+NORMALIZE_HAND_FEATURES = [
+    'approx_vol',
+    'avg_num_tissue_pixel',
+    'avg_tissue',
+    'avg_tissue_thickness',
+    'avg_tissue_by_total',
+    'avg_tissue_by_lung',
+    'mean',
+    'skew',
+    'kurtosis'
+]
+
+NORMALIZE_DEMO_FEATURES = ['age']  # sex and smoking_status are categorical
 
 class IPFDataLoader:
     """Load patient data from CSV and NPY files"""
