@@ -337,7 +337,8 @@ class IPFSliceDataset(Dataset):
     
     def __init__(self, patient_ids: List[str], patient_data: Dict, 
                  features_data: Dict, image_size: Tuple[int, int] = (224, 224),
-                 normalize_slope: bool = True, slope_scaler: Optional[StandardScaler] = None,
+                 normalize_slope: bool = True,normalize_intercept: bool = True, slope_scaler: Optional[StandardScaler] = None,
+                 intercept_scaler: Optional[StandardScaler] = None,
                  augment: bool = False):
         
         self.patient_ids = patient_ids
@@ -348,6 +349,8 @@ class IPFSliceDataset(Dataset):
         self.slope_scaler = slope_scaler
         self.augment = augment
         self._cache = {}
+        self.normalize_intercept = normalize_intercept
+        self.intercept_scaler = intercept_scaler
         
         # Build slice index
         self.slices = []
@@ -366,7 +369,8 @@ class IPFSliceDataset(Dataset):
                 self.slices.append({
                     'patient_id': pid,
                     'npy_path': npy_file,
-                    'slope': patient_data[pid]['slope']
+                    'slope': patient_data[pid]['slope'],
+                    'intercept': patient_data[pid]['intercept']
                 })
         
         # Fit slope scaler if needed
@@ -379,6 +383,15 @@ class IPFSliceDataset(Dataset):
             # Use StandardScaler - RobustScaler can cause mode collapse by over-centering
             self.slope_scaler = StandardScaler()
             self.slope_scaler.fit(slopes)
+
+        if self.normalize_intercept and self.intercept_scaler is None:
+            unique_intercepts = {}
+            for s in self.slices:
+                unique_intercepts[s['patient_id']] = s['intercept']
+
+            intercepts = np.array(list(unique_intercepts.values())).reshape(-1, 1)
+            self.intercept_scaler = StandardScaler()
+            self.intercept_scaler.fit(intercepts)
     
     def __len__(self):
         return len(self.slices)
@@ -418,11 +431,16 @@ class IPFSliceDataset(Dataset):
         if self.normalize_slope:
             slope = self.slope_scaler.transform([[slope]])[0][0]
 
+        intercept = slice_info['intercept']
+        if self.normalize_intercept:
+            intercept = self.intercept_scaler.transform([[intercept]])[0][0]
+
         result = {
             'image': img_tensor,
             'slope': torch.FloatTensor([slope]),
+            'intercept': torch.FloatTensor([intercept]),
             'patient_id': slice_info['patient_id'],
-            'slice_path': slice_info['npy_path'],
+            'slice_path': slice_info['npy_path']
         }
 
         self._cache[idx] = result
@@ -473,6 +491,7 @@ def patient_group_collate(batch):
         return {
             'images': torch.empty(0, 1, 224, 224),
             'slopes': torch.empty(0),
+            'intercepts': torch.empty(0),
             'patient_ids': [],
             'lengths': torch.empty(0, dtype=torch.long)
         }
@@ -480,6 +499,7 @@ def patient_group_collate(batch):
     # Stack all slices (patient slices are contiguous due to sampler)
     images = torch.stack([item['image'] for item in batch])
     slopes = torch.stack([item['slope'] for item in batch])
+    intercepts = torch.stack([item['intercept'] for item in batch])
     
     # Compute lengths and patient order
     # Since sampler guarantees contiguity, we can count consecutive same IDs
@@ -502,6 +522,7 @@ def patient_group_collate(batch):
     return {
         'images': images,                                    # (total_slices, C, H, W)
         'slopes': slopes,                                    # (total_slices,)
+        'intercepts': intercepts,                            # (total_slices,)
         'patient_ids': pid_order,                           # List of patient IDs in order
         'lengths': torch.tensor(lengths, dtype=torch.long)  # Number of slices per patient
     }
@@ -793,7 +814,7 @@ class ImprovedSliceLevelCNN(nn.Module):
                  attention_temperature: float = 1.0):
         super().__init__()
         self.attention_temperature = attention_temperature
-        
+        self.use_intercept = True
         # Backbone with features_only=True
         self.backbone = timm.create_model(
             backbone_name,
@@ -826,12 +847,19 @@ class ImprovedSliceLevelCNN(nn.Module):
             nn.Dropout(dropout * 0.33),
             nn.Linear(64, 1)
         )
+
+        self.intercept_head = nn.Sequential(
+            nn.Linear(2, 32),   # [cnn_pred , intercept]
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
     
-    def forward(self, x, return_attention=False):
+    def forward(self, x, intercepts = None,return_attention=False):
         """
         Args:
-            x: (B, 1, H, W) input images
-            return_attention: if True, return attention maps for visualization
+            x: (B, C, H, W) input images
+            intercepts: (B,) or (B, 1) intercept values per slice
+            return_attention: if True, return attention maps
         """
         # Extract features
         features = self.backbone(x)
@@ -843,12 +871,24 @@ class ImprovedSliceLevelCNN(nn.Module):
         # Global pooling
         pooled = self.global_pool(attended_features).flatten(1)  # (B, C)
         
-        # Prediction (with temperature scaling during inference)
-        output = self.head(pooled).squeeze(-1)  # (B,)
+        # Get slice-level predictions
+        slice_preds = self.head(pooled).squeeze(-1)  # (B,)
+        
+        # ✓ FUSE WITH INTERCEPTS IF PROVIDED
+        if intercepts is not None:
+            # Ensure intercepts are (B, 1)
+            if intercepts.dim() == 1:
+                intercepts = intercepts.view(-1, 1)
+            elif intercepts.dim() == 2 and intercepts.size(1) != 1:
+                intercepts = intercepts[:, 0:1]  # Take first column
+            
+            # Concatenate [slice_pred, intercept]
+            fusion_input = torch.cat([slice_preds.view(-1, 1), intercepts], dim=1)  # (B, 2)
+            slice_preds = self.intercept_head(fusion_input).squeeze(-1)  # (B,)
         
         if return_attention:
-            return output, attention_map
-        return output
+            return slice_preds, attention_map
+        return slice_preds
 
 
 class ImprovedSlopeCorrector(nn.Module):

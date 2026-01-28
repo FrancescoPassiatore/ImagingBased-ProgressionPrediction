@@ -13,7 +13,7 @@ DROP_PCT = -10.0     # progression threshold (%)
 # BASELINE FUNCTION
 # ============================
 def get_baseline(df):
-    baseline_rows = []
+    """baseline_rows = []
 
     for pid, group in df.groupby('Patient'):
         if 0 in group['Weeks'].values:
@@ -26,6 +26,18 @@ def get_baseline(df):
             'Patient': pid,
             'FVC_baseline': row['FVC'],
             'baseline_week': row['Weeks']
+        })"""
+    
+    baseline_rows =[]
+    #Carica da D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv
+    train_df = pd.read_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv')
+
+    for pid in train_df['Patient'].unique():
+        baseline_fvc = train_df[train_df['Patient'] == pid]['fvc_intercept0'].values[0]
+        baseline_rows.append({
+            'Patient': pid,
+            'FVC_baseline': baseline_fvc,
+            'baseline_week': 0
         })
 
     return pd.DataFrame(baseline_rows)
@@ -68,8 +80,7 @@ def compute_event_52(group):
 # LOAD DATA
 # ============================
 data_csv = (
-    "C:/Users/frank/OneDrive/Desktop/Thesis - Progress Prediction/"
-    "CodeDevelopment/osic-pulmonary-fibrosis-progression/train.csv"
+    r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train.csv"
 )
 
 df = pd.read_csv(data_csv)
@@ -124,13 +135,13 @@ test_df  = event_52_df[event_52_df['Patient'].isin(test_patients)].reset_index(d
 print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
 event_52_df.to_csv(
-    "patient_progression_52w.csv",
+    "patient_progression_52w_intercept.csv",
     index=False
 )
 
-train_df.to_csv("train_patients_52w.csv", index=False)
-val_df.to_csv("val_patients_52w.csv", index=False)
-test_df.to_csv("test_patients_52w.csv", index=False)
+train_df.to_csv("train_patients_52w_intercept.csv", index=False)
+val_df.to_csv("val_patients_52w_intercept.csv", index=False)
+test_df.to_csv("test_patients_52w_intercept.csv", index=False)
 
 
 label_info = {
@@ -142,5 +153,5 @@ label_info = {
 }
 
 import json
-with open("label_definition_52w.json", "w") as f:
+with open("label_definition_52w_intercept.json", "w") as f:
     json.dump(label_info, f, indent=4)

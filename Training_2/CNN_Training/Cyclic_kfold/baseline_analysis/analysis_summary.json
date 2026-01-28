@@ -1,0 +1,15 @@
+{
+  "total_patients": 176,
+  "patients_with_both_values": 176,
+  "patients_with_week_0": 18,
+  "correlation": 0.966977672677529,
+  "correlation_pvalue": 3.106505786677999e-105,
+  "mean_difference": 45.797981224648446,
+  "std_difference": 215.0307408207721,
+  "median_difference": 35.2638889263028,
+  "mean_abs_difference": 148.9056803772358,
+  "mean_percent_difference": 2.0264553359938926,
+  "regression_slope": 0.9695353065472138,
+  "regression_intercept": 130.23832220755958,
+  "regression_r2": 0.9350458194568506
+}

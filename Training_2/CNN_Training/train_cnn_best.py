@@ -6,6 +6,7 @@ Trains the CNN model using best hyperparameters from Optuna on all 5 folds.
 Saves models and predictions for MLP corrector training.
 """
 
+from pyexpat import model
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -64,7 +65,8 @@ CONFIG = {
     'image_size': (224, 224),
     'backbone': 'efficientnet_b1',  # Changed from efficientnet_b0
     'pretrained': True,
-    'normalize_slope': False,
+    'normalize_slope': True,
+    'normalize_intercept': True,
     
     # Loss function: 'mse', 'huber', 'focal_mse', 'focal_huber'
     'loss_type': 'mse',  # Use plain MSE with sample weighting (focal normalization was canceling weights)
@@ -79,10 +81,10 @@ CONFIG = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
     # Output
-    'checkpoint_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\checkpoints_mse_no_norm'),
-    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_mse_no_norm'),
-    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\final_results_mse_no_norm'),
-    'diagnostics_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\diagnostics_mse_no_norm')
+    'checkpoint_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\checkpoints_mse_added_intercept'),
+    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\predictions_mse_added_intercept'),
+    'results_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\final_results_mse_added_intercept'),
+    'diagnostics_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\CNN_Training\Cyclic_kfold\diagnostics_mse_added_intercept')
 }
 
 def variance_regularization(predictions):
@@ -120,20 +122,26 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
         
         images = batch['images'].to(device)
         slopes = batch['slopes'].to(device)
+        intercepts = batch['intercepts'].to(device)
         lengths = batch['lengths'].tolist()
         patient_ids = batch['patient_ids']
         
         
         
-        # Forward pass
+        # ✓ PASS INTERCEPTS TO MODEL
         if use_attention:
-            preds_per_slice, attention_weights = model(images, return_attention=True)
-            # ✓ FIXED: Proper attention reduction
-            # attention_weights shape should be (batch_slices,) not (batch_slices, H, W)
+            preds_per_slice, attention_weights = model(
+                images, 
+                intercepts=intercepts,  # ← ADD THIS
+                return_attention=True
+            )
             if attention_weights.dim() > 1:
                 attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
         else:
-            preds_per_slice = model(images)
+            preds_per_slice = model(
+                images, 
+                intercepts=intercepts  # ← ADD THIS
+            )
             attention_weights = None
         
         preds_per_slice = preds_per_slice.view(-1)
@@ -146,25 +154,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
         extreme_in_batch = (torch.abs(patient_slopes) > extreme_threshold).sum().item()
         n_extreme_cases += extreme_in_batch
         
+        # Attention-weighted OR simple mean aggregation
         if attention_weights is not None:
-            # Attention-weighted average with temperature scaling
             attention_blocks = torch.split(attention_weights, lengths)
             patient_preds = torch.stack([
-                (pred_block * torch.softmax(attn_block / 0.5, dim=0)).sum()  # temperature = 0.5
+                (pred_block * torch.softmax(attn_block / 0.5, dim=0)).sum()
                 for pred_block, attn_block in zip(pred_blocks, attention_blocks)
             ])
-            pred_std = torch.std(patient_preds)
-            variance_loss = torch.clamp(1.0 - pred_std, min=0.0)
-
         else:
-            # Simple mean (fallback)
+            # ✓ Simple mean - intercepts already fused inside forward()
             patient_preds = torch.stack([block.mean() for block in pred_blocks])
-            
-
         
-        patient_slopes = torch.stack([block[0] for block in slopes_blocks])
-        extreme_in_batch = (torch.abs(patient_slopes) > extreme_threshold).sum().item()
-        n_extreme_cases += extreme_in_batch
 
         if sample_weights_dict is not None:
             batch_weights = torch.tensor(
@@ -236,17 +236,21 @@ def validate(model, dataloader, criterion, device, return_predictions=False, use
             
             images = batch['images'].to(device)
             slopes = batch['slopes'].to(device)
+            intercepts = batch['intercepts'].to(device)
             lengths = batch['lengths'].tolist()
             patient_ids = batch['patient_ids']
             
-            # Forward pass with optional attention
+            # ✓ Pass intercepts to model
             if use_attention:
-                preds_per_slice, attention_weights = model(images, return_attention=True)
-                # Reduce spatial attention to per-slice importance
+                preds_per_slice, attention_weights = model(
+                    images, 
+                    intercepts=intercepts,
+                    return_attention=True
+                )
                 if attention_weights.dim() > 1:
                     attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
             else:
-                preds_per_slice = model(images)
+                preds_per_slice = model(images, intercepts=intercepts)
                 attention_weights = None
             
             preds_per_slice = preds_per_slice.view(-1)
@@ -298,19 +302,25 @@ def predict_fold(model, dataloader, device, slope_scaler, use_attention=False):
                 continue
             
             images = batch['images'].to(device)
+            intercepts = batch['intercepts'].to(device)
             lengths = batch['lengths'].tolist()
             patient_ids = batch['patient_ids']
             
-            # Forward pass with optional attention
+            # ✓ Forward pass with intercepts (ALWAYS pass them now)
             if use_attention:
-                preds_per_slice, attention_weights = model(images, return_attention=True)
-                # Reduce spatial attention to per-slice importance
+                preds_per_slice, attention_weights = model(
+                    images, 
+                    intercepts=intercepts,  # ✓ Intercepts already fused in forward()
+                    return_attention=True
+                )
                 if attention_weights.dim() > 1:
                     attention_weights = attention_weights.view(attention_weights.size(0), -1).mean(dim=1)
             else:
-                preds_per_slice = model(images)
+                preds_per_slice = model(
+                    images, 
+                    intercepts=intercepts  # ✓ Intercepts already fused in forward()
+                )
                 attention_weights = None
-
 
             preds_per_slice = preds_per_slice.view(-1)
             pred_blocks = torch.split(preds_per_slice, lengths)
@@ -321,7 +331,7 @@ def predict_fold(model, dataloader, device, slope_scaler, use_attention=False):
                 
                 for patient_id, pred_block, attn_block in zip(patient_ids, pred_blocks, attention_blocks):
                     # Attention-weighted mean with temperature
-                    attn_normalized = torch.softmax(attn_block / 0.5, dim=0)  # temperature = 0.5
+                    attn_normalized = torch.softmax(attn_block / 0.5, dim=0)
                     pred_mean_norm = (pred_block * attn_normalized).sum().cpu().item()
                     
                     # Denormalize
@@ -332,10 +342,10 @@ def predict_fold(model, dataloader, device, slope_scaler, use_attention=False):
                     
                     predictions[patient_id] = pred_mean
             else:
+                # ✓ SIMPLE MEAN - intercepts already fused inside forward()
                 for patient_id, pred_block in zip(patient_ids, pred_blocks):
-                    # Simple mean
                     pred_mean_norm = pred_block.mean().cpu().item()
-                
+                    
                     # Denormalize
                     if slope_scaler is not None:
                         pred_mean = slope_scaler.inverse_transform([[pred_mean_norm]])[0][0]

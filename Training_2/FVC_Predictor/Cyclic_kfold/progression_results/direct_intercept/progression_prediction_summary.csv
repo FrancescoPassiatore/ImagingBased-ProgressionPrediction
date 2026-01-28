@@ -1,0 +1,2 @@
+Approach,Accuracy,Precision,Recall,F1-Score,Specificity,AUC-ROC,AP,N,Prog,Stable
+FVC@52 CNN,0.570±0.052,0.352±0.173,0.287±0.102,0.301±0.107,0.713±0.111,0.545±0.083,0.382±0.122,165,54,111

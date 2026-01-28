@@ -99,9 +99,9 @@ from tqdm import tqdm
 # =============================================================================
 
 CONFIG = {
-    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\predictions_cyclic_kfold\sample_weighting'),
-    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_results/sample_weighting_calib'),
-    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_plots/sample_weighting_calib'),
+    'predictions_dir': Path(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training_2\FVC_Predictor\Cyclic_kfold\predictions_cyclic_kfold\direct'),
+    'results_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_results/direct_intercept'),
+    'plots_dir': Path(r'D:/FrancescoP/ImagingBased-ProgressionPrediction/Training_2/FVC_Predictor/Cyclic_kfold/progression_plots/direct_intercept'),
     'csv_path': 'Training/CNN_Slope_Prediction/train_with_coefs.csv',
     'csv_features_path': 'Training/CNN_Slope_Prediction/patient_features.csv',
     'npy_dir': 'Dataset/extracted_npy/extracted_npy',
@@ -112,25 +112,7 @@ CONFIG = {
 
 
 # ...existing code from evaluate_progression.py for classify_progression, get_ground_truth_progression, classify_progression_from_fvc52, compute_progression_metrics, plot_progression_comparison...
-def classify_progression(baseline_fvc, future_fvc, threshold_percent=10.0):
-    """
-    Classify progression based on FVC decline
-    
-    Args:
-        baseline_fvc: float, FVC at baseline (ml)
-        future_fvc: float or array, FVC at future timepoint(s)
-        threshold_percent: float, percentage decline threshold (default 10%)
-    
-    Returns:
-        is_progression: bool or array, True if progression detected
-        decline_percent: float or array, percentage decline
-    """
-    decline_absolute = baseline_fvc - future_fvc
-    decline_percent = 100 * decline_absolute / baseline_fvc
-    
-    is_progression = decline_percent >= threshold_percent
-    
-    return is_progression, decline_percent
+
 
 def get_ground_truth_progression(patient_data, threshold_percent=10.0):
     """
@@ -144,17 +126,15 @@ def get_ground_truth_progression(patient_data, threshold_percent=10.0):
     Returns:
         Dict {patient_id: bool} indicating progression
     """
+
+    #get ground truth progression labels from D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_risk_2\data\patient_progression_52w.csv
     labels = {}
-    
-    for pid, pdata in patient_data.items():
-        fvc = np.asarray(pdata['fvc_values'])
-        if len(fvc) < 2:
-            continue
-        baseline = fvc[0]
-        future = fvc[1:]
-        _, decline_pct = classify_progression(baseline, future, threshold_percent)
-        labels[pid] = int(np.any(decline_pct >= threshold_percent))
-    
+    gt_df = pd.read_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\Progression_prediction_risk_2\data_intercept\patient_progression_52w_intercept.csv')
+    for _, row in gt_df.iterrows():
+        patient_id = row['Patient']
+        gt_progression = row['event_52']  # 1 if progression, 0 if stable
+        labels[patient_id] = bool(gt_progression) # True = progression, False = stable
+
     return labels
 
 def classify_progression_from_fvc52(predictions_df, threshold_percent=10.0):
@@ -173,14 +153,14 @@ def classify_progression_from_fvc52(predictions_df, threshold_percent=10.0):
     """
     results = []
 
-    train_df = pd.read_csv('Training/CNN_Slope_Prediction/train.csv')
+    train_df = pd.read_csv(r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\train_with_coefs.csv')
     baseline_fvc_dict = {}
+    #Get intercept
     for patient_id in train_df['Patient'].unique():
-        patient_weeks = train_df[train_df['Patient'] == patient_id]['Weeks'].values
-        if len(patient_weeks)>0:
-            earliest_week_idx = np.argmin(patient_weeks)
-            baseline_fvc_val = train_df[train_df['Patient'] == patient_id].iloc[earliest_week_idx]['FVC']
-            baseline_fvc_dict[patient_id] = baseline_fvc_val
+        #Extract just one value of intercept0 since they are all the same for each patient
+        baseline_fvc = train_df[train_df['Patient'] == patient_id]['fvc_intercept0'].values[0]
+        if baseline_fvc is not None :
+            baseline_fvc_dict[patient_id] = baseline_fvc
 
     for _, row in predictions_df.iterrows():
         patient_id = row['patient_id']
@@ -191,8 +171,8 @@ def classify_progression_from_fvc52(predictions_df, threshold_percent=10.0):
         baseline_fvc = baseline_fvc_dict[patient_id]
         fvc52_pred = row['predicted_fvc52']
 
-        decline_pred_abs = baseline_fvc - fvc52_pred
-        decline_pred_pct = 100 * decline_pred_abs / baseline_fvc
+        decline_pred_abs = fvc52_pred - baseline_fvc
+        decline_pred_pct = 100 * (decline_pred_abs / baseline_fvc)
 
         predicted_progression = decline_pred_pct >= threshold_percent
 
@@ -270,7 +250,7 @@ def evaluate_approach_progression(config, ground_truth_labels):
         fold_preds = all_folds_predictions[fold_key]
         
         # Get test predictions for this fold
-        test_preds_dict = fold_preds['test']['fvc52']  # {patient_id: predicted_fvc52}
+        test_preds_dict = fold_preds['test'] # {patient_id: predicted_fvc52}
         
         if len(test_preds_dict) == 0:
             print(f"⚠️  Fold {fold_idx}: No test predictions")
