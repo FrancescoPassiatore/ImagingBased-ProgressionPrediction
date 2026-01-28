@@ -10,7 +10,7 @@ def read_csv(file_path):
 
 
 def main():
-    file_path = r'D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\train.csv'
+    file_path = r'C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Dataset\train.csv'
     df = read_csv(file_path)
 
     #For each patient calculate the decay percentage between baseline and 52 weeks 
@@ -52,7 +52,7 @@ def main():
 
     decay_df = pd.DataFrame(decay_data)
     # Save to csv
-    decay_df.to_csv('decay_percentage_percent.csv', index=False)
+    #decay_df.to_csv('decay_percentage_percent.csv', index=False)
 
 
     #From dataframe filter the pateints outside the range of [-5,10] for baselineweek and [42,62] for week52week
@@ -61,81 +61,25 @@ def main():
         (decay_df['Week52Week'] >= 42) & (decay_df['Week52Week'] <= 62)
     ]
     # Save filtered to csv
-    filtered_decay_df.to_csv('decay_percentage_percent_filtered.csv', index=False)
+    #filtered_decay_df.to_csv('decay_percentage_percent_filtered.csv', index=False)
 
     #Count the patients that have both baselineweek and week52week in the specified ranges
     count_filtered_patients = filtered_decay_df.shape[0]
     print(f"Number of patients with both baseline week and week 52 week in the specified ranges: {count_filtered_patients}")
 
-
-    #Plot graph of decay percentage distribution
-    import matplotlib.pyplot as plt
-    plt.hist(decay_df['DecayPercentage'], bins=50, alpha=0.7, label='All Patients')
-    plt.hist(filtered_decay_df['DecayPercentage'], bins=50, alpha=0.7, label='Filtered Patients')
-    plt.xlabel('Decay Percentage')
-    plt.ylabel('Number of Patients')
-    plt.title('Decay Percentage Distribution')
-    plt.legend()
-    plt.savefig('decay_percentage_distribution.png')
-    plt.show()
-
-    plt.figure()
-    plt.boxplot(
-        [decay_df['DecayPercentage'], filtered_decay_df['DecayPercentage']],
-        labels=['All', 'Filtered']
-    )
-    plt.ylabel('Decay Percentage')
-    plt.title('Effect of Filtering')
-    plt.savefig('decay_boxplot_filtered.png')
-    plt.show()
-
-
-    #Baseline week vs decay percentage
-    plt.figure()
-    plt.scatter(decay_df['BaselineWeek'], decay_df['DecayPercentage'], alpha=0.5)
-    plt.axvline(0, linestyle='--')
-    plt.xlabel('Baseline Week')
-    plt.ylabel('Decay Percentage')
-    plt.title('Decay vs Baseline Timing')
-    plt.savefig('decay_vs_baseline_week.png')
-    plt.show()
-
-    #Is the range [-8,8] too large
-    plt.figure()
-    plt.scatter(decay_df['Week52Week'], decay_df['DecayPercentage'], alpha=0.5)
-    plt.axvline(52, linestyle='--')
-    plt.xlabel('Week 52 Measurement Week')
-    plt.ylabel('Decay Percentage')
-    plt.title('Decay vs Week52 Timing')
-    plt.savefig('decay_vs_week52_week.png')
-    plt.show()
-
-    #Baseline FVC vs decay percentage
-    plt.figure()
-    plt.scatter(decay_df['BaselineFVC'], decay_df['DecayPercentage'], alpha=0.5)
-    plt.xlabel('Baseline FVC')
-    plt.ylabel('Decay Percentage')
-    plt.title('Decay vs Baseline FVC')
-    plt.savefig('decay_vs_baseline_fvc.png')
-    plt.show()
-
-    #Absolute vs relative decline
-    decay_df['DeltaFVC'] = decay_df['Week52FVC'] - decay_df['BaselineFVC']
-
-    plt.figure()
-    plt.scatter(decay_df['DeltaFVC'], decay_df['DecayPercentage'], alpha=0.5)
-    plt.xlabel('ΔFVC (ml)')
-    plt.ylabel('Decay Percentage')
-    plt.title('Absolute vs Relative Decline')
-    plt.savefig('delta_vs_percent_decay.png')
-    plt.show()
-
-
-
-
-
-
-
+    #Create dataset based on filtered patients
+    #Add progressed label or not based on decay percentage > 10%
+    filtered_decay_df['has_progressed'] = filtered_decay_df['DecayPercentage'] > 10
+    
+    #Save to csv
+    filtered_decay_df.to_csv('decay_percentage_progressed_label.csv', index=False)
+    
+    #Add from tran.csv, age,sex,smoking status
+    train_df = read_csv(file_path)
+    merged_df = pd.merge(filtered_decay_df, train_df[['Patient', 'Age', 'Sex', 'SmokingStatus']].drop_duplicates(), left_on='PatientID', right_on='Patient', how='left')
+    merged_df = merged_df.drop(columns=['Patient'])
+    #Save to csv
+    merged_df.to_csv('decay_percentage_progressed_label_with_demographics.csv', index=False)
 
 if __name__ == "__main__":
     main()
