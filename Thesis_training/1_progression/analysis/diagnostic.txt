@@ -1,0 +1,528 @@
+EFFICIENTNET B1
+======================================================================
+FEATURE DIAGNOSTIC
+======================================================================
+
+Dataset sizes:
+  Train: 50 patients
+  Val: 17 patients
+  Features: 1280
+
+======================================================================
+1. CLASS SEPARABILITY ANALYSIS
+======================================================================
+
+PCA explained variance: 37.41%
+
+Computing t-SNE (may take a minute)...
+
+✓ Saved: feature_separability.png
+
+📊 Interpretation:
+  ⚠️  Very low PCA variance captured - features are diffuse
+  Class separation in PCA space: 1.27
+
+======================================================================
+2. BASELINE MODEL COMPARISON
+======================================================================
+
+Logistic Regression:
+  Train AUC: 1.000
+  Val AUC:   0.486
+  Gap:       0.514
+  ⚠️  Even simple models struggle - features may be weak!
+
+Random Forest (10 trees):
+  Train AUC: 1.000
+  Val AUC:   0.361
+  Gap:       0.639
+  ⚠️  Even simple models struggle - features may be weak!
+
+Random Forest (100 trees):
+  Train AUC: 1.000
+  Val AUC:   0.583
+  Gap:       0.417
+  ⚠️  Even simple models struggle - features may be weak!
+
+======================================================================
+3. FEATURE STATISTICS
+======================================================================
+
+Feature variance:
+  Low variance features (<0.01): 0/1280
+
+Data quality:
+  NaN values: 0
+  Inf values: 0
+
+Feature discrimination:
+  Mean absolute difference: 0.0910
+  Max difference: 0.6993
+  Features with diff > 0.1: 411/1280
+
+======================================================================
+4. AGGREGATION STRATEGY COMPARISON
+======================================================================
+
+MAX aggregation:
+  Val AUC: 0.479
+
+MEAN aggregation:
+  Val AUC: 0.549
+
+MEDIAN aggregation:
+  Val AUC: 0.583
+
+STD aggregation:
+  Val AUC: 0.444
+
+PERCENTILE_90 aggregation:
+  Val AUC: 0.562
+
+======================================================================
+5. DIAGNOSTIC SUMMARY & RECOMMENDATIONS
+======================================================================
+
+🚨 ISSUES DETECTED:
+  ⚠️  WEAK FEATURES: Even simple models achieve <0.65 AUC
+
+💡 RECOMMENDED ACTIONS:
+  1. Try different backbone (ResNet50 instead of EfficientNet)
+  2. Use pretrained features from ImageNet + fine-tuning
+  3. Add clinical features (age, FVC, DLCO, etc.)
+  4. Try mean/median aggregation instead of max
+  5. Consider ensemble of multiple aggregations
+  6. Collect more data if possible
+  7. Try different slice selection (only central slices)
+
+======================================================================
+QUICK AGGREGATION TEST
+======================================================================
+
+Testing max aggregation...
+  Train AUC: 1.000, Val AUC: 0.590, Gap: 0.410
+
+Testing mean aggregation...
+  Train AUC: 1.000, Val AUC: 0.590, Gap: 0.410
+
+Testing median aggregation...
+  Train AUC: 1.000, Val AUC: 0.556, Gap: 0.444
+
+Testing min aggregation...
+  Train AUC: 1.000, Val AUC: 0.535, Gap: 0.465
+
+Testing std aggregation...
+  Train AUC: 1.000, Val AUC: 0.431, Gap: 0.569
+
+Testing percentile_75 aggregation...
+  Train AUC: 1.000, Val AUC: 0.500, Gap: 0.500
+
+Testing percentile_90 aggregation...
+  Train AUC: 1.000, Val AUC: 0.556, Gap: 0.444
+
+======================================================================
+AGGREGATION COMPARISON SUMMARY
+======================================================================
+  aggregation  train_auc  val_auc      gap
+          max        1.0 0.590278 0.409722
+         mean        1.0 0.590278 0.409722
+       median        1.0 0.555556 0.444444
+percentile_90        1.0 0.555556 0.444444
+          min        1.0 0.534722 0.465278
+percentile_75        1.0 0.500000 0.500000
+          std        1.0 0.430556 0.569444
+
+✅ BEST AGGREGATION: max
+   Val AUC: 0.590
+   ⚠️  Even best aggregation <0.70 - features may be weak
+
+######################################################################################################################
+RESNET50
+
+======================================================================
+FEATURE DIAGNOSTIC
+======================================================================
+
+Dataset sizes:
+  Train: 50 patients
+  Val: 17 patients
+  Features: 2048
+
+======================================================================
+1. CLASS SEPARABILITY ANALYSIS
+======================================================================
+
+PCA explained variance: 38.49%
+
+Computing t-SNE (may take a minute)...
+
+✓ Saved: feature_separability.png
+
+📊 Interpretation:
+  ⚠️  Very low PCA variance captured - features are diffuse
+  Class separation in PCA space: 0.62
+  ⚠️  Classes are VERY close - features may not be discriminative!
+
+======================================================================
+2. BASELINE MODEL COMPARISON
+======================================================================
+
+Logistic Regression:
+  Train AUC: 1.000
+  Val AUC:   0.625
+  Gap:       0.375
+
+Random Forest (10 trees):
+  Train AUC: 0.996
+  Val AUC:   0.674
+  Gap:       0.322
+
+Random Forest (100 trees):
+  Train AUC: 1.000
+  Val AUC:   0.632
+  Gap:       0.368
+
+======================================================================
+3. FEATURE STATISTICS
+======================================================================
+
+Feature variance:
+  Low variance features (<0.01): 0/2048
+
+Data quality:
+  NaN values: 0
+  Inf values: 0
+
+Feature discrimination:
+  Mean absolute difference: 0.0693
+  Max difference: 0.5048
+  Features with diff > 0.1: 484/2048
+
+======================================================================
+4. AGGREGATION STRATEGY COMPARISON
+======================================================================
+
+MAX aggregation:
+  Val AUC: 0.618
+
+MEAN aggregation:
+  Val AUC: 0.507
+
+MEDIAN aggregation:
+  Val AUC: 0.576
+
+STD aggregation:
+  Val AUC: 0.618
+
+PERCENTILE_90 aggregation:
+  Val AUC: 0.424
+
+======================================================================
+5. DIAGNOSTIC SUMMARY & RECOMMENDATIONS
+======================================================================
+
+🚨 ISSUES DETECTED:
+  ⚠️  WEAK FEATURES: Even simple models achieve <0.65 AUC
+  ⚠️  POOR SEPARABILITY: Classes overlap heavily in feature space
+
+💡 RECOMMENDED ACTIONS:
+  1. Try different backbone (ResNet50 instead of EfficientNet)
+  2. Use pretrained features from ImageNet + fine-tuning
+  3. Add clinical features (age, FVC, DLCO, etc.)
+  4. Try mean/median aggregation instead of max
+  5. Consider ensemble of multiple aggregations
+  6. Collect more data if possible
+  7. Try different slice selection (only central slices)
+
+======================================================================
+QUICK AGGREGATION TEST
+======================================================================
+
+Testing max aggregation...
+  Train AUC: 1.000, Val AUC: 0.639, Gap: 0.361
+
+Testing mean aggregation...
+  Train AUC: 1.000, Val AUC: 0.625, Gap: 0.375
+
+Testing median aggregation...
+  Train AUC: 1.000, Val AUC: 0.583, Gap: 0.417
+
+Testing min aggregation...
+  Train AUC: 1.000, Val AUC: 0.472, Gap: 0.528
+
+Testing std aggregation...
+  Train AUC: 1.000, Val AUC: 0.514, Gap: 0.486
+
+Testing percentile_75 aggregation...
+  Train AUC: 1.000, Val AUC: 0.604, Gap: 0.396
+
+Testing percentile_90 aggregation...
+  Train AUC: 1.000, Val AUC: 0.590, Gap: 0.410
+
+======================================================================
+AGGREGATION COMPARISON SUMMARY
+======================================================================
+  aggregation  train_auc  val_auc      gap
+          max        1.0 0.638889 0.361111
+         mean        1.0 0.625000 0.375000
+percentile_75        1.0 0.604167 0.395833
+percentile_90        1.0 0.590278 0.409722
+       median        1.0 0.583333 0.416667
+          std        1.0 0.513889 0.486111
+          min        1.0 0.472222 0.527778
+
+✅ BEST AGGREGATION: max
+   Val AUC: 0.639
+   ⚠️  Even best aggregation <0.70 - features may be weak
+
+
+#########################################################################################################################
+DENSENET121
+======================================================================
+FEATURE DIAGNOSTIC
+======================================================================
+
+Dataset sizes:
+  Train: 50 patients
+  Val: 17 patients
+  Features: 50176
+
+======================================================================
+1. CLASS SEPARABILITY ANALYSIS
+======================================================================
+
+PCA explained variance: 24.15%
+
+Computing t-SNE (may take a minute)...
+
+✓ Saved: feature_separability.png
+
+📊 Interpretation:
+  ⚠️  Very low PCA variance captured - features are diffuse
+  Class separation in PCA space: 23.89
+
+======================================================================
+2. BASELINE MODEL COMPARISON
+======================================================================
+
+Logistic Regression:
+  Train AUC: 1.000
+  Val AUC:   0.444
+  Gap:       0.556
+  ⚠️  Even simple models struggle - features may be weak!
+
+Random Forest (10 trees):
+  Train AUC: 1.000
+  Val AUC:   0.583
+  Gap:       0.417
+  ⚠️  Even simple models struggle - features may be weak!
+
+Random Forest (100 trees):
+  Train AUC: 1.000
+  Val AUC:   0.472
+  Gap:       0.528
+  ⚠️  Even simple models struggle - features may be weak!
+
+======================================================================
+3. FEATURE STATISTICS
+======================================================================
+
+Feature variance:
+  Low variance features (<0.01): 18911/50176
+  ⚠️  Many low-variance features - may need feature selection!
+
+Data quality:
+  NaN values: 0
+  Inf values: 0
+
+Feature discrimination:
+  Mean absolute difference: 0.1674
+  Max difference: 4.1983
+  Features with diff > 0.1: 18882/50176
+
+======================================================================
+4. AGGREGATION STRATEGY COMPARISON
+======================================================================
+
+MAX aggregation:
+  Val AUC: 0.646
+
+MEAN aggregation:
+  Val AUC: 0.458
+
+MEDIAN aggregation:
+  Val AUC: 0.597
+
+STD aggregation:
+  Val AUC: 0.361
+
+PERCENTILE_90 aggregation:
+  Val AUC: 0.569
+
+======================================================================
+5. DIAGNOSTIC SUMMARY & RECOMMENDATIONS
+======================================================================
+
+🚨 ISSUES DETECTED:
+  ⚠️  WEAK FEATURES: Even simple models achieve <0.65 AUC
+  ⚠️  REDUNDANT FEATURES: Many low-variance features
+
+💡 RECOMMENDED ACTIONS:
+  1. Try different backbone (ResNet50 instead of EfficientNet)
+  2. Use pretrained features from ImageNet + fine-tuning
+  3. Add clinical features (age, FVC, DLCO, etc.)
+  4. Try mean/median aggregation instead of max
+  5. Consider ensemble of multiple aggregations
+  6. Collect more data if possible
+  7. Try different slice selection (only central slices)
+
+======================================================================
+QUICK AGGREGATION TEST
+======================================================================
+
+Testing max aggregation...
+  Train AUC: 1.000, Val AUC: 0.472, Gap: 0.528
+
+Testing mean aggregation...
+  Train AUC: 1.000, Val AUC: 0.486, Gap: 0.514
+
+Testing median aggregation...
+  Train AUC: 1.000, Val AUC: 0.549, Gap: 0.451
+
+Testing min aggregation...
+  Train AUC: 1.000, Val AUC: 0.410, Gap: 0.590
+
+Testing std aggregation...
+  Train AUC: 1.000, Val AUC: 0.438, Gap: 0.562
+
+
+
+##########################################################################################################################
+EFFICIENTNET - B0
+
+======================================================================
+1. CLASS SEPARABILITY ANALYSIS
+======================================================================
+
+PCA explained variance: 35.37%
+
+Computing t-SNE (may take a minute)...
+
+✓ Saved: feature_separability.png
+
+📊 Interpretation:
+  ⚠️  Very low PCA variance captured - features are diffuse
+  Class separation in PCA space: 1.21
+
+======================================================================
+2. BASELINE MODEL COMPARISON
+======================================================================
+
+Logistic Regression:
+  Train AUC: 1.000
+  Val AUC:   0.542
+  Gap:       0.458
+  ⚠️  Even simple models struggle - features may be weak!
+
+Random Forest (10 trees):
+  Train AUC: 1.000
+  Val AUC:   0.625
+  Gap:       0.375
+
+Random Forest (100 trees):
+  Train AUC: 1.000
+  Val AUC:   0.528
+  Gap:       0.472
+  ⚠️  Even simple models struggle - features may be weak!
+
+======================================================================
+3. FEATURE STATISTICS
+======================================================================
+
+Feature variance:
+  Low variance features (<0.01): 0/1280
+
+Data quality:
+  NaN values: 0
+  Inf values: 0
+
+Feature discrimination:
+  Mean absolute difference: 0.0751
+  Max difference: 0.7432
+  Features with diff > 0.1: 324/1280
+
+======================================================================
+4. AGGREGATION STRATEGY COMPARISON
+======================================================================
+
+MAX aggregation:
+  Val AUC: 0.528
+
+MEAN aggregation:
+  Val AUC: 0.562
+
+MEDIAN aggregation:
+  Val AUC: 0.486
+
+STD aggregation:
+  Val AUC: 0.590
+
+PERCENTILE_90 aggregation:
+  Val AUC: 0.597
+
+======================================================================
+5. DIAGNOSTIC SUMMARY & RECOMMENDATIONS
+======================================================================
+
+🚨 ISSUES DETECTED:
+  ⚠️  WEAK FEATURES: Even simple models achieve <0.65 AUC
+
+💡 RECOMMENDED ACTIONS:
+  1. Try different backbone (ResNet50 instead of EfficientNet)
+  2. Use pretrained features from ImageNet + fine-tuning
+  3. Add clinical features (age, FVC, DLCO, etc.)
+  4. Try mean/median aggregation instead of max
+  5. Consider ensemble of multiple aggregations
+  6. Collect more data if possible
+  7. Try different slice selection (only central slices)
+
+======================================================================
+QUICK AGGREGATION TEST
+======================================================================
+
+Testing max aggregation...
+  Train AUC: 1.000, Val AUC: 0.528, Gap: 0.472
+
+Testing mean aggregation...
+  Train AUC: 1.000, Val AUC: 0.528, Gap: 0.472
+
+Testing median aggregation...
+  Train AUC: 1.000, Val AUC: 0.479, Gap: 0.521
+
+Testing min aggregation...
+  Train AUC: 1.000, Val AUC: 0.424, Gap: 0.576
+
+Testing std aggregation...
+  Train AUC: 1.000, Val AUC: 0.604, Gap: 0.396
+
+Testing percentile_75 aggregation...
+  Train AUC: 1.000, Val AUC: 0.500, Gap: 0.500
+
+Testing percentile_90 aggregation...
+  Train AUC: 1.000, Val AUC: 0.542, Gap: 0.458
+
+======================================================================
+AGGREGATION COMPARISON SUMMARY
+======================================================================
+  aggregation  train_auc  val_auc      gap
+          std        1.0 0.604167 0.395833
+percentile_90        1.0 0.541667 0.458333
+          max        1.0 0.527778 0.472222
+         mean        1.0 0.527778 0.472222
+percentile_75        1.0 0.500000 0.500000
+       median        1.0 0.479167 0.520833
+          min        1.0 0.423611 0.576389
+
+✅ BEST AGGREGATION: std
+   Val AUC: 0.604
+   ⚠️  Even best aggregation <0.70 - features may be weak
