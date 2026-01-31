@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import os
@@ -11,6 +12,7 @@ from skimage import morphology, measure
 from scipy.stats import skew, kurtosis
 from scipy.ndimage import label
 import warnings
+from pathlib import Path
 warnings.filterwarnings("ignore")
 
 # ============================================================================
@@ -765,9 +767,9 @@ def calculate_feature_correlations(features_df: pd.DataFrame,
     
     # Merge features with progression data
     merged = features_df.merge(
-        progression_df[['Patient', target_col]], 
+        progression_df[['PatientID', target_col]], 
         left_on='patient_id', 
-        right_on='Patient',
+        right_on='PatientID',
         how='inner'
     )
     
@@ -811,8 +813,6 @@ def calculate_feature_correlations(features_df: pd.DataFrame,
     
     # Create DataFrame and sort by absolute correlation
     corr_df = pd.DataFrame(correlations)
-    corr_df = corr_df.sort_values('abs_pearson_r', ascending=False)
-    
     return corr_df
 
 
@@ -913,10 +913,6 @@ def save_correlation_analysis(features_df: pd.DataFrame,
     # Calculate correlations
     corr_df = calculate_feature_correlations(features_df, progression_df, target_col)
     
-    # Save correlation results
-    corr_output = output_path.replace('.csv', '_correlations.csv')
-    corr_df.to_csv(corr_output, index=False)
-    print(f"Correlation analysis saved to: {corr_output}")
     
     # Generate and save report
     report = create_feature_importance_report(features_df, progression_df, target_col)
@@ -939,11 +935,11 @@ if __name__ == "__main__":
     BASE_PATH = "C:/Users/frank/OneDrive/Desktop/Thesis - Progress Prediction/CodeDevelopment/osic-pulmonary-fibrosis-progression/"
     
     # Load patient IDs
-    train_csv = pd.read_csv(os.path.join(BASE_PATH, "train.csv"))
-    train_patient_ids = train_csv['Patient'].unique().tolist()
+    train_csv = pd.read_csv(Path(r"C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv"))
+    train_patient_ids = train_csv['PatientID'].unique().tolist()
     
     print(f"Found {len(train_patient_ids)} patients in training set")
-    
+    """
     # Optional: Load patient heights if available
     # Create dictionary mapping patient_id -> height in meters
     # Example: patient_heights = {'ID00007637202177411956430': 1.75, ...}
@@ -961,7 +957,7 @@ if __name__ == "__main__":
         patient_heights
     )
     
-    # Save results
+    # Save result
     output_path = os.path.join(BASE_PATH, "patient_features_improved.csv")
     train_features_df.to_csv(output_path, index=False)
     print(f"\nFeatures saved to: {output_path}")
@@ -974,15 +970,17 @@ if __name__ == "__main__":
     print(train_features_df.head())
     
     print("\n=== Feature Statistics ===")
-    print(train_features_df.describe())
+    print(train_features_df.describe())"""
     
     # ========================================================================
     # CORRELATION ANALYSIS (if progression data available)
     # ========================================================================
     
     # Check if progression/decay percentage file exists
-    progression_file = os.path.join(BASE_PATH, "patient_progression.csv")
-    
+    progression_file = Path(r"C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv")
+    feature_file = Path(r"C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Feature_extraction\patient_features_improved.csv")
+    features = pd.read_csv(feature_file)
+    output_path = Path(r"C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Feature_extraction")
     if os.path.exists(progression_file):
         print("\n=== Analyzing Correlations with Disease Progression ===")
         
@@ -992,8 +990,7 @@ if __name__ == "__main__":
         
         # Determine target column name
         # Common names: 'decay_percentage', 'fvc_decline', 'progression_rate'
-        possible_targets = ['decay_percentage', 'fvc_decline', 'progression_rate', 
-                          'decline_rate', 'percent_decline']
+        possible_targets = ['DecayPercentage']
         
         target_col = None
         for col in possible_targets:
@@ -1006,7 +1003,7 @@ if __name__ == "__main__":
             
             # Perform correlation analysis
             corr_df = save_correlation_analysis(
-                train_features_df, 
+                features, 
                 progression_df, 
                 output_path,
                 target_col

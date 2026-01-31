@@ -323,6 +323,7 @@ def build_image_features_for_split(split_name, patient_ids):
     for pid in patient_ids:
         lung_list, num_t_pixels_list, tissue_by_total_list, tissue_by_lung_list = [], [], [], []
         flag = -1
+        mean_list, skewness_list, kurtosis_list = [], [], []
 
         for perc in percentile_range:
             img_no = get_img(perc[0], pid, split_name)
@@ -349,10 +350,15 @@ def build_image_features_for_split(split_name, patient_ids):
                 if not math.isnan(tissue_by_lung):
                     tissue_by_lung_list.append(tissue_by_lung)
                     
-                    
-                 # Extract Mean, Skew, Kurtosis for the lung image histogram
+            
+                # Extract Mean, Skew, Kurtosis for the lung image histogram
                 mean, skewness, kurtosis_value = extract_histogram_features(img, mask)
-                
+                if not math.isnan(mean):
+                    mean_list.append(mean)
+                if not math.isnan(skewness):
+                    skewness_list.append(skewness)
+                if not math.isnan(kurtosis_value):
+                    kurtosis_list.append(kurtosis_value)
             except Exception as e:
                 print(split_name, pid, img_no, e)
                 pass
@@ -376,6 +382,17 @@ def build_image_features_for_split(split_name, patient_ids):
         except:
             Avg_NumTissuePixel_30_60 = Avg_Tissue_30_60 = Avg_Tissue_thickness_30_60 = 0
             Avg_TissueByTotal_30_60 = Avg_TissueByLung_30_60 = 0
+            
+            
+        try:
+            Avg_Mean_30_60 = round(sum(mean_list)/len(mean_list), 4)
+            Avg_Skew_30_60 = round(sum(skewness_list)/len(skewness_list), 4)
+            Avg_Kurtosis_30_60 = round(sum(kurtosis_list)/len(kurtosis_list), 4)
+            print(Avg_Mean_30_60, Avg_Skew_30_60, Avg_Kurtosis_30_60)
+        except:
+            Avg_Mean_30_60 = 0
+            Avg_Skew_30_60 = 0
+            Avg_Kurtosis_30_60 = 0
 
         # Numero di slice tra due percentili
         try:
@@ -402,9 +419,9 @@ def build_image_features_for_split(split_name, patient_ids):
             "Avg_Tissue_thickness_30_60": Avg_Tissue_thickness_30_60,
             "Avg_TissueByTotal_30_60": Avg_TissueByTotal_30_60,
             "Avg_TissueByLung_30_60": Avg_TissueByLung_30_60,
-            "Mean_30_60": mean,
-            "Skew_30_60": skewness,
-            "Kurtosis_30_60": kurtosis_value
+            "Mean_30_60": Avg_Mean_30_60,
+            "Skew_30_60": Avg_Skew_30_60,
+            "Kurtosis_30_60": Avg_Kurtosis_30_60
         }
         image_data.append(patient_dict)
 
@@ -417,7 +434,7 @@ def build_image_features_for_split(split_name, patient_ids):
 
 image_data_df_train = build_image_features_for_split('train', tr_patient_ids)
 
-image_data_df_train.to_csv("patient_features.csv",index=False)
+image_data_df_train.to_csv("patient_features_30_60.csv",index=False)
 
 
 #Add other features 
