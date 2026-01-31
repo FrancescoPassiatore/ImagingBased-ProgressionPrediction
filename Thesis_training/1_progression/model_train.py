@@ -4,8 +4,11 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import torch.nn as nn
 import numpy as np
-from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_recall_curve, average_precision_score
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import (
+    roc_curve, roc_auc_score, precision_recall_curve, 
+    average_precision_score, confusion_matrix, classification_report,
+    accuracy_score, precision_score, recall_score, f1_score
+)
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
@@ -80,12 +83,13 @@ class ProgressionPredictionModel(nn.Module):
         layers = []
         input_dim = agg_output_dim
         
-        for hidden_dim in hidden_dims:
+        for i, hidden_dim in enumerate(hidden_dims):
             layers.append(nn.Linear(input_dim, hidden_dim))
             if use_batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
+            dropout_rate = dropout if i==0 else dropout * 0.8
+            layers.append(nn.Dropout(dropout_rate))
             input_dim = hidden_dim
         
         # Final classification layer
@@ -126,7 +130,8 @@ class ModelTrainer:
         device: str = 'cuda',
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-4,
-        class_weights: Tuple[float, float] = None
+        class_weights: Tuple[float, float] = None,
+        use_scheduler: bool = True,
     ):
         self.model = model.to(device)
         self.device = device
@@ -135,6 +140,16 @@ class ModelTrainer:
             lr=learning_rate,
             weight_decay=weight_decay
         )
+        self.use_scheduler = use_scheduler
+
+        if use_scheduler:
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            )
         
         # Loss function with class weights
         if class_weights is not None:
@@ -147,6 +162,10 @@ class ModelTrainer:
             'train_loss': [], 'train_auc': [], 'train_acc': [],
             'val_loss': [], 'val_auc': [], 'val_acc': []
         }
+
+    def _apply_label_smoothing(self, labels, epsilon= 0.1):
+        """Apply label smoothing to binary labels"""
+        return labels * (1 - epsilon) + 0.5 * epsilon
     
     def train_epoch(self, dataloader) -> Dict[str, float]:
         """Train for one epoch"""
@@ -161,9 +180,11 @@ class ModelTrainer:
             lengths = batch['lengths'].to(self.device)  # (B,)
             labels = batch['labels'].to(self.device).float()  # (B,)
             
-            # Forward pass
+            # Apply label smoothing
+            labels_smooth = self._apply_label_smoothing(labels)
+
             logits = self.model(slice_features, lengths).squeeze(-1)  # (B,)
-            loss = self.criterion(logits, labels)
+            loss = self.criterion(logits, labels_smooth)
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -246,6 +267,9 @@ class ModelTrainer:
             # Validate
             val_metrics = self.evaluate(val_loader)
             
+            if self.use_scheduler:
+                self.scheduler.step(val_metrics['auc'])
+
             # Record history
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['train_auc'].append(train_metrics['auc'])
@@ -314,27 +338,34 @@ class ModelTrainer:
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.show() 
+        
 
 
 
 def plot_evaluation_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    threshold: float = 0.5,
     save_path: str = None
 ):
     """
-    Plot comprehensive evaluation metrics
+    Plot comprehensive evaluation metrics with custom threshold
     """
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
     # 1. ROC Curve
-    from sklearn.metrics import roc_curve
     fpr, tpr, _ = roc_curve(y_true, y_pred)
     auc = roc_auc_score(y_true, y_pred)
     
     axes[0, 0].plot(fpr, tpr, label=f'AUC = {auc:.3f}')
     axes[0, 0].plot([0, 1], [0, 1], 'k--', alpha=0.3)
+    
+    # Mark the threshold point
+    y_pred_binary = (y_pred >= threshold).astype(int)
+    idx = np.argmin(np.abs(roc_curve(y_true, y_pred)[2] - threshold))
+    axes[0, 0].plot(fpr[idx], tpr[idx], 'ro', markersize=10, 
+                    label=f'Threshold = {threshold:.3f}')
+    
     axes[0, 0].set_xlabel('False Positive Rate')
     axes[0, 0].set_ylabel('True Positive Rate')
     axes[0, 0].set_title('ROC Curve')
@@ -353,17 +384,18 @@ def plot_evaluation_metrics(
     axes[0, 1].grid(True, alpha=0.3)
     
     # 3. Confusion Matrix
-    y_pred_binary = (y_pred > 0.5).astype(int)
+    y_pred_binary = (y_pred >= threshold).astype(int)
     cm = confusion_matrix(y_true, y_pred_binary)
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1, 0])
     axes[1, 0].set_xlabel('Predicted')
     axes[1, 0].set_ylabel('Actual')
-    axes[1, 0].set_title('Confusion Matrix')
+    axes[1, 0].set_title(f'Confusion Matrix (Threshold = {threshold:.3f})')
     
     # 4. Prediction distribution
     axes[1, 1].hist(y_pred[y_true == 0], bins=20, alpha=0.5, label='No Progression', color='blue')
     axes[1, 1].hist(y_pred[y_true == 1], bins=20, alpha=0.5, label='Progression', color='red')
-    axes[1, 1].axvline(x=0.5, color='k', linestyle='--', alpha=0.5)
+    axes[1, 1].axvline(x=threshold, color='k', linestyle='--', alpha=0.7, linewidth=2,
+                       label=f'Threshold = {threshold:.3f}')
     axes[1, 1].set_xlabel('Predicted Probability')
     axes[1, 1].set_ylabel('Count')
     axes[1, 1].set_title('Prediction Distribution')
@@ -373,14 +405,14 @@ def plot_evaluation_metrics(
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.show()
+        plt.close()
     
     # Print classification report
     print("\n" + "="*60)
-    print("CLASSIFICATION REPORT")
+    print(f"CLASSIFICATION REPORT (Threshold = {threshold:.3f})")
     print("="*60)
-    print(classification_report(y_true, y_pred_binary, target_names=['No Progression', 'Progression']))
-
+    print(classification_report(y_true, y_pred_binary, 
+                                target_names=['No Progression', 'Progression']))
 
 
 
@@ -444,10 +476,56 @@ def train_kfold_cv(features_df, splits, config, results_dir):
     return results_df
 
 
-def train_single_fold(features_df: pd.DataFrame,fold_data: dict,fold_idx: int,config: dict,results_dir: Path):
+def train_single_fold(features_df: pd.DataFrame,fold_data: dict,fold_idx: int,config: dict,results_dir: Path,resume_from_checkpoint: bool = True):
     """
     Train model on a single fold
     """
+    fold_dir = results_dir / f"fold_{fold_idx}"
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    
+    checkpoint_path = fold_dir / "best_model.pth"
+    # Check if checkpoint exists and we should resume
+    if resume_from_checkpoint and checkpoint_path.exists():
+        print("\n" + "="*70)
+        print(f"CHECKPOINT FOUND FOR FOLD {fold_idx}")
+        print("="*70)
+        print(f"Loading checkpoint from: {checkpoint_path}")
+        
+        checkpoint = torch.load(checkpoint_path,weights_only=False)
+
+        # Check if this fold is already complete (has all test metrics)
+        # A complete fold must have both default and optimal threshold test results
+        is_complete = (
+            'test_metrics_default' in checkpoint and 
+            'test_metrics_optimal' in checkpoint and
+            'val_auc' in checkpoint and
+            'optimal_threshold' in checkpoint
+        )
+        
+        if is_complete:
+            print("\n✓ Fold already completed! Loading saved results...")
+            print(f"  Val AUC: {checkpoint.get('val_auc', 'N/A'):.4f}")
+            print(f"  Optimal Threshold: {checkpoint.get('optimal_threshold', 'N/A'):.4f}")
+            print(f"  Test AUC (Default): {checkpoint['test_metrics_default'].get('auc', 'N/A'):.4f}")
+            print(f"  Test AUC (Optimal): {checkpoint['test_metrics_optimal'].get('auc', 'N/A'):.4f}")
+            
+            # Return saved results
+            return {
+                'fold_idx': fold_idx,
+                'val_auc': checkpoint.get('val_auc'),
+                'val_metrics': checkpoint.get('val_metrics', {}),
+                'test_metrics_default': checkpoint.get('test_metrics_default', {}),
+                'test_metrics_optimal': checkpoint.get('test_metrics_optimal', {}),
+                'optimal_threshold': checkpoint.get('optimal_threshold'),
+                'threshold_analysis': checkpoint.get('threshold_analysis', {}),
+                'loaded_from_checkpoint': True
+            }
+        else:
+            print("\n⚠ Checkpoint found but fold is incomplete. Starting from scratch...")
+            print("   (This may happen if previous run was interrupted during evaluation)")
+    
+
+
     print("\n" + "="*70)
     print(f"TRAINING FOLD {fold_idx}")
     print("="*70)
@@ -485,7 +563,8 @@ def train_single_fold(features_df: pd.DataFrame,fold_data: dict,fold_idx: int,co
         feature_dim=config['feature_dim'],
         aggregation=config['aggregation'],
         hidden_dims=config['hidden_dims'],
-        dropout=config['dropout']
+        dropout=config['dropout'],
+        use_batch_norm=config['use_batch_norm']
     )
     
     # Create trainer
@@ -494,7 +573,8 @@ def train_single_fold(features_df: pd.DataFrame,fold_data: dict,fold_idx: int,co
         device='cuda' if torch.cuda.is_available() else 'cpu',
         learning_rate=config['learning_rate'],
         weight_decay=config['weight_decay'],
-        class_weights=class_weights
+        class_weights=class_weights,
+        use_scheduler=config['use_scheduler']
     )
     
     # Train
@@ -515,50 +595,683 @@ def train_single_fold(features_df: pd.DataFrame,fold_data: dict,fold_idx: int,co
     fold_dir.mkdir(parents=True, exist_ok=True)
     
     trainer.plot_training_history(save_path=str(fold_dir / "training_history.png"))
+    # ========== VALIDATION SET ANALYSIS ==========
+    print(f"\n{'='*70}")
+    print("VALIDATION SET THRESHOLD ANALYSIS")
+    print("="*70)
     
-    # Evaluate on test set
+    val_results = trainer.evaluate(val_loader)
+    
+    # Analyze validation ROC and find optimal thresholds
+    threshold_analysis = plot_validation_roc_with_thresholds(
+        y_true=val_results['labels'],
+        y_pred=val_results['predictions'],
+        save_path=str(fold_dir / "validation_roc_threshold_analysis.png")
+    )
+    
+    # Print threshold analysis
+    print("\nThreshold Analysis on Validation Set:")
+    print("-" * 70)
+    for name, metrics in threshold_analysis.items():
+        print(f"\n{name}:")
+        print(f"  Threshold: {metrics['threshold']:.4f}")
+        print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+        print(f"  Precision: {metrics['precision']:.4f}")
+        print(f"  Recall:    {metrics['recall']:.4f}")
+        print(f"  F1-Score:  {metrics['f1']:.4f}")
+        print(f"  Specificity: {metrics['specificity']:.4f}")
+    
+    # Choose optimal threshold (using Youden's J statistic)
+    optimal_threshold = threshold_analysis['Youden']['threshold']
+    print(f"\n{'='*70}")
+    print(f"Selected Optimal Threshold: {optimal_threshold:.4f} (Youden's J)")
+    print("="*70)
+    
+    # Save validation metrics
+    val_metrics = {
+        'auc': val_results['auc'],
+        'threshold_analysis': threshold_analysis
+    }
+    
+    # ========== TEST SET EVALUATION ==========
     print(f"\n{'='*70}")
     print("TEST SET EVALUATION")
     print("="*70)
     
-    test_metrics = trainer.evaluate(test_loader)
+    test_results = trainer.evaluate(test_loader)
     
-    print(f"\nTest Metrics:")
-    print(f"  Loss: {test_metrics['loss']:.4f}")
-    print(f"  AUC: {test_metrics['auc']:.4f}")
-    print(f"  Accuracy: {test_metrics['acc']:.4f}")
-    print(f"  F1-Score: {test_metrics['f1']:.4f}")
-    
-    # Plot evaluation metrics
-    plot_evaluation_metrics(
-        y_true=test_metrics['labels'],
-        y_pred=test_metrics['predictions'],
-        save_path=str(fold_dir / "test_evaluation.png")
+    # Evaluate with default threshold (0.5)
+    print("\n1. Default Threshold (0.5):")
+    print("-" * 70)
+    test_metrics_default = evaluate_with_threshold(
+        y_true=test_results['labels'],
+        y_pred=test_results['predictions'],
+        threshold=0.5
     )
     
-    # Save model
+    for metric, value in test_metrics_default.items():
+        print(f"  {metric.capitalize()}: {value:.4f}")
+    
+    # Evaluate with optimal threshold from validation
+    print(f"\n2. Optimal Threshold ({optimal_threshold:.4f}):")
+    print("-" * 70)
+    test_metrics_optimal = evaluate_with_threshold(
+        y_true=test_results['labels'],
+        y_pred=test_results['predictions'],
+        threshold=optimal_threshold
+    )
+    
+    for metric, value in test_metrics_optimal.items():
+        print(f"  {metric.capitalize()}: {value:.4f}")
+    
+    # Plot evaluation metrics with default threshold
+    plot_evaluation_metrics(
+        y_true=test_results['labels'],
+        y_pred=test_results['predictions'],
+        threshold=0.5,
+        save_path=str(fold_dir / "test_evaluation_default_threshold.png")
+    )
+    
+    # Plot evaluation metrics with optimal threshold
+    plot_evaluation_metrics(
+        y_true=test_results['labels'],
+        y_pred=test_results['predictions'],
+        threshold=optimal_threshold,
+        save_path=str(fold_dir / "test_evaluation_optimal_threshold.png")
+    )
+    
+    # Save comprehensive results
     torch.save({
         'model_state_dict': model.state_dict(),
         'config': config,
-        'test_metrics': test_metrics,
-        'fold_idx': fold_idx
-    }, fold_dir / "best_model.pth")
+        'fold_idx': fold_idx,
+        'val_auc': best_val_auc,
+        'val_metrics': val_metrics,
+        'optimal_threshold': optimal_threshold,
+        'threshold_analysis': threshold_analysis,
+        'test_metrics_default': test_metrics_default,
+        'test_metrics_optimal': test_metrics_optimal,
+    }, checkpoint_path)
     
-    # Save predictions
+    # Save predictions with both thresholds
     predictions_df = pd.DataFrame({
         'patient_id': test_ids,
-        'true_label': test_metrics['labels'],
-        'predicted_prob': test_metrics['predictions']
+        'true_label': test_results['labels'],
+        'predicted_prob': test_results['predictions'],
+        'predicted_label_default': (test_results['predictions'] >= 0.5).astype(int),
+        'predicted_label_optimal': (test_results['predictions'] >= optimal_threshold).astype(int)
     })
     predictions_df.to_csv(fold_dir / "test_predictions.csv", index=False)
+    
+    # Save metrics summary to CSV
+    metrics_summary = pd.DataFrame({
+        'metric': ['val_auc', 'optimal_threshold'] + 
+                  [f'test_{k}_default' for k in test_metrics_default.keys()] +
+                  [f'test_{k}_optimal' for k in test_metrics_optimal.keys()],
+        'value': [best_val_auc, optimal_threshold] + 
+                 list(test_metrics_default.values()) +
+                 list(test_metrics_optimal.values())
+    })
+    metrics_summary.to_csv(fold_dir / "metrics_summary.csv", index=False)
+    
+    print(f"\n{'='*70}")
+    print("FOLD TRAINING COMPLETE")
+    print("="*70)
+    print(f"Results saved to: {fold_dir}")
     
     return {
         'fold_idx': fold_idx,
         'val_auc': best_val_auc,
-        'test_auc': test_metrics['auc'],
-        'test_acc': test_metrics['acc'],
-        'test_f1': test_metrics['f1']
+        'val_metrics': val_metrics,
+        'test_metrics_default': test_metrics_default,
+        'test_metrics_optimal': test_metrics_optimal,
+        'optimal_threshold': optimal_threshold,
+        'threshold_analysis': threshold_analysis,
+        'loaded_from_checkpoint': False
     }
 
 
+def compute_specificity(y_true, y_pred_binary):
+    """Compute specificity (True Negative Rate)"""
+    cm = confusion_matrix(y_true, y_pred_binary)
+    tn, fp, fn, tp = cm.ravel()
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    return specificity
 
+
+
+def find_optimal_threshold(y_true, y_pred, metric='youden'):
+    """
+    Find optimal threshold using different strategies
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted probabilities
+        metric: 'youden', 'f1', or 'closest_to_topleft'
+    
+    Returns:
+        optimal_threshold, metrics_at_threshold
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+    
+    if metric == 'youden':
+        # Youden's J statistic = Sensitivity + Specificity - 1
+        j_scores = tpr - fpr
+        optimal_idx = np.argmax(j_scores)
+        optimal_threshold = thresholds[optimal_idx]
+        
+    elif metric == 'f1':
+        # Find threshold that maximizes F1 score
+        f1_scores = []
+        for threshold in thresholds:
+            y_pred_binary = (y_pred >= threshold).astype(int)
+            f1 = f1_score(y_true, y_pred_binary, zero_division=0)
+            f1_scores.append(f1)
+        optimal_idx = np.argmax(f1_scores)
+        optimal_threshold = thresholds[optimal_idx]
+        
+    elif metric == 'closest_to_topleft':
+        # Find point closest to top-left corner (0, 1)
+        distances = np.sqrt((fpr - 0)**2 + (tpr - 1)**2)
+        optimal_idx = np.argmin(distances)
+        optimal_threshold = thresholds[optimal_idx]
+    
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+    
+    # Compute metrics at optimal threshold
+    y_pred_binary = (y_pred >= optimal_threshold).astype(int)
+    
+    metrics = {
+        'threshold': optimal_threshold,
+        'accuracy': accuracy_score(y_true, y_pred_binary),
+        'precision': precision_score(y_true, y_pred_binary, zero_division=0),
+        'recall': recall_score(y_true, y_pred_binary, zero_division=0),
+        'f1': f1_score(y_true, y_pred_binary, zero_division=0),
+        'specificity': compute_specificity(y_true, y_pred_binary),
+        'sensitivity': recall_score(y_true, y_pred_binary, zero_division=0),  # same as recall
+        'fpr': fpr[optimal_idx],
+        'tpr': tpr[optimal_idx]
+    }
+    
+    return optimal_threshold, metrics
+
+
+def plot_validation_roc_with_thresholds(y_true, y_pred, save_path=None):
+    """
+    Plot ROC curve with multiple threshold strategies marked
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+    auc = roc_auc_score(y_true, y_pred)
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Plot ROC curve
+    ax.plot(fpr, tpr, 'b-', linewidth=2, label=f'ROC Curve (AUC = {auc:.3f})')
+    ax.plot([0, 1], [0, 1], 'k--', alpha=0.3, label='Random Classifier')
+    
+    # Find and mark optimal thresholds
+    threshold_strategies = {
+        'Youden': 'youden',
+        'Max F1': 'f1',
+        'Closest to Top-Left': 'closest_to_topleft'
+    }
+    
+    colors = {'Youden': 'red', 'Max F1': 'green', 'Closest to Top-Left': 'orange'}
+    markers = {'Youden': 'o', 'Max F1': 's', 'Closest to Top-Left': '^'}
+    
+    threshold_results = {}
+    
+    for name, strategy in threshold_strategies.items():
+        optimal_threshold, metrics = find_optimal_threshold(y_true, y_pred, strategy)
+        threshold_results[name] = {'threshold': optimal_threshold, **metrics}
+        
+        # Mark on plot
+        ax.plot(metrics['fpr'], metrics['tpr'], 
+                markers[name], 
+                color=colors[name], 
+                markersize=12, 
+                label=f"{name}: {optimal_threshold:.3f}",
+                markeredgecolor='white',
+                markeredgewidth=1.5)
+    
+    # Mark default threshold (0.5)
+    default_pred = (y_pred >= 0.5).astype(int)
+    default_metrics = {
+        'accuracy': accuracy_score(y_true, default_pred),
+        'precision': precision_score(y_true, default_pred, zero_division=0),
+        'recall': recall_score(y_true, default_pred, zero_division=0),
+        'f1': f1_score(y_true, default_pred, zero_division=0),
+        'specificity': compute_specificity(y_true, default_pred)
+    }
+    
+    # Find FPR and TPR for threshold 0.5
+    idx_05 = np.argmin(np.abs(thresholds - 0.5))
+    ax.plot(fpr[idx_05], tpr[idx_05], 'D', 
+            color='purple', 
+            markersize=12, 
+            label=f"Default (0.5)",
+            markeredgecolor='white',
+            markeredgewidth=1.5)
+    
+    threshold_results['Default (0.5)'] = {'threshold': 0.5, **default_metrics, 
+                                           'fpr': fpr[idx_05], 'tpr': tpr[idx_05]}
+    
+    ax.set_xlabel('False Positive Rate', fontsize=12)
+    ax.set_ylabel('True Positive Rate', fontsize=12)
+    ax.set_title('Validation ROC Curve with Optimal Thresholds', fontsize=14, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+    
+    return threshold_results
+
+
+def evaluate_with_threshold(y_true, y_pred, threshold=0.5):
+    """
+    Evaluate predictions with a specific threshold
+    """
+    y_pred_binary = (y_pred >= threshold).astype(int)
+    
+    metrics = {
+        'threshold': threshold,
+        'auc': roc_auc_score(y_true, y_pred),
+        'accuracy': accuracy_score(y_true, y_pred_binary),
+        'precision': precision_score(y_true, y_pred_binary, zero_division=0),
+        'recall': recall_score(y_true, y_pred_binary, zero_division=0),
+        'f1': f1_score(y_true, y_pred_binary, zero_division=0),
+        'specificity': compute_specificity(y_true, y_pred_binary)
+    }
+    
+    return metrics
+
+
+
+def aggregate_fold_results(fold_results: list, save_path: Path):
+    """
+    Aggregate results across all folds
+    """
+    print("\n" + "="*70)
+    print("AGGREGATE RESULTS ACROSS ALL FOLDS")
+    print("="*70)
+    
+    # Collect metrics
+    val_aucs = [r['val_auc'] for r in fold_results]
+    
+    # Default threshold metrics
+    test_auc_default = [r['test_metrics_default']['auc'] for r in fold_results]
+    test_acc_default = [r['test_metrics_default']['accuracy'] for r in fold_results]
+    test_prec_default = [r['test_metrics_default']['precision'] for r in fold_results]
+    test_rec_default = [r['test_metrics_default']['recall'] for r in fold_results]
+    test_f1_default = [r['test_metrics_default']['f1'] for r in fold_results]
+    test_spec_default = [r['test_metrics_default']['specificity'] for r in fold_results]
+    
+    # Optimal threshold metrics
+    test_auc_optimal = [r['test_metrics_optimal']['auc'] for r in fold_results]
+    test_acc_optimal = [r['test_metrics_optimal']['accuracy'] for r in fold_results]
+    test_prec_optimal = [r['test_metrics_optimal']['precision'] for r in fold_results]
+    test_rec_optimal = [r['test_metrics_optimal']['recall'] for r in fold_results]
+    test_f1_optimal = [r['test_metrics_optimal']['f1'] for r in fold_results]
+    test_spec_optimal = [r['test_metrics_optimal']['specificity'] for r in fold_results]
+    
+    optimal_thresholds = [r['optimal_threshold'] for r in fold_results]
+    
+    # Create summary DataFrame
+    summary_data = {
+        'Metric': [
+            'Validation AUC',
+            'Optimal Threshold',
+            '',
+            'Test AUC (Default)',
+            'Test Accuracy (Default)',
+            'Test Precision (Default)',
+            'Test Recall (Default)',
+            'Test F1 (Default)',
+            'Test Specificity (Default)',
+            '',
+            'Test AUC (Optimal)',
+            'Test Accuracy (Optimal)',
+            'Test Precision (Optimal)',
+            'Test Recall (Optimal)',
+            'Test F1 (Optimal)',
+            'Test Specificity (Optimal)'
+        ],
+        'Mean': [
+            np.mean(val_aucs),
+            np.mean(optimal_thresholds),
+            np.nan,
+            np.mean(test_auc_default),
+            np.mean(test_acc_default),
+            np.mean(test_prec_default),
+            np.mean(test_rec_default),
+            np.mean(test_f1_default),
+            np.mean(test_spec_default),
+            np.nan,
+            np.mean(test_auc_optimal),
+            np.mean(test_acc_optimal),
+            np.mean(test_prec_optimal),
+            np.mean(test_rec_optimal),
+            np.mean(test_f1_optimal),
+            np.mean(test_spec_optimal)
+        ],
+        'Std': [
+            np.std(val_aucs),
+            np.std(optimal_thresholds),
+            np.nan,
+            np.std(test_auc_default),
+            np.std(test_acc_default),
+            np.std(test_prec_default),
+            np.std(test_rec_default),
+            np.std(test_f1_default),
+            np.std(test_spec_default),
+            np.nan,
+            np.std(test_auc_optimal),
+            np.std(test_acc_optimal),
+            np.std(test_prec_optimal),
+            np.std(test_rec_optimal),
+            np.std(test_f1_optimal),
+            np.std(test_spec_optimal)
+        ]
+    }
+    
+    summary_df = pd.DataFrame(summary_data)
+    
+    # Print summary
+    print("\nSummary Statistics:")
+    print(summary_df.to_string(index=False))
+    
+    # Save summary
+    summary_df.to_csv(save_path / "aggregate_metrics_summary.csv", index=False)
+    
+    # Create detailed fold-by-fold results
+    detailed_results = []
+    for r in fold_results:
+        fold_data = {
+            'fold': r['fold_idx'],
+            'val_auc': r['val_auc'],
+            'optimal_threshold': r['optimal_threshold'],
+            'test_auc_default': r['test_metrics_default']['auc'],
+            'test_accuracy_default': r['test_metrics_default']['accuracy'],
+            'test_precision_default': r['test_metrics_default']['precision'],
+            'test_recall_default': r['test_metrics_default']['recall'],
+            'test_f1_default': r['test_metrics_default']['f1'],
+            'test_specificity_default': r['test_metrics_default']['specificity'],
+            'test_auc_optimal': r['test_metrics_optimal']['auc'],
+            'test_accuracy_optimal': r['test_metrics_optimal']['accuracy'],
+            'test_precision_optimal': r['test_metrics_optimal']['precision'],
+            'test_recall_optimal': r['test_metrics_optimal']['recall'],
+            'test_f1_optimal': r['test_metrics_optimal']['f1'],
+            'test_specificity_optimal': r['test_metrics_optimal']['specificity'],
+        }
+        detailed_results.append(fold_data)
+    
+    detailed_df = pd.DataFrame(detailed_results)
+    detailed_df.to_csv(save_path / "detailed_fold_results.csv", index=False)
+    
+    print(f"\nResults saved to:")
+    print(f"  - {save_path / 'aggregate_metrics_summary.csv'}")
+    print(f"  - {save_path / 'detailed_fold_results.csv'}")
+    
+    # ADD THESE LINES BEFORE RETURN:
+    
+    # Create aggregate visualizations
+    print("\n" + "="*70)
+    print("CREATING AGGREGATE VISUALIZATIONS")
+    print("="*70)
+    
+    # Plot aggregate test ROC curves
+    plot_aggregate_test_roc(
+        results_dir=save_path,
+        fold_results=fold_results,
+        save_path=save_path / "aggregate_test_roc_curves.png"
+    )
+    
+    # Plot confusion matrices for all folds
+    plot_aggregate_confusion_matrices(
+        results_dir=save_path,
+        fold_results=fold_results,
+        save_path=save_path / "aggregate_confusion_matrices.png"
+    )
+    
+    # Plot metrics comparison
+    plot_aggregate_metrics_comparison(
+        fold_results=fold_results,
+        save_path=save_path / "aggregate_metrics_comparison.png"
+    )
+    
+    print("\n" + "="*70)
+    print("AGGREGATE VISUALIZATIONS COMPLETE")
+    print("="*70)
+    print(f"\nGenerated plots:")
+    print(f"  - {save_path / 'aggregate_test_roc_curves.png'}")
+    print(f"  - {save_path / 'aggregate_confusion_matrices.png'}")
+    print(f"  - {save_path / 'aggregate_metrics_comparison.png'}")
+    
+    return summary_df, detailed_df
+
+
+
+def plot_aggregate_test_roc(results_dir: Path, fold_results: list, save_path: Path):
+    """
+    Plot ROC curves for all folds on the same plot (test set)
+    Loads predictions from saved CSV files
+    """
+    fig, ax = plt.subplots(figsize=(12, 9))
+    
+    all_tprs = []
+    all_aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
+    
+    colors = plt.cm.tab10(np.linspace(0, 1, len(fold_results)))
+    
+    # Plot each fold
+    for i, result in enumerate(fold_results):
+        fold_idx = result['fold_idx']
+        fold_dir = results_dir / f"fold_{fold_idx}"
+        predictions_file = fold_dir / "test_predictions.csv"
+        
+        if predictions_file.exists():
+            # Load predictions
+            pred_df = pd.read_csv(predictions_file)
+            y_true = pred_df['true_label'].values
+            y_pred = pred_df['predicted_prob'].values
+            
+            # Compute ROC
+            fpr, tpr, _ = roc_curve(y_true, y_pred)
+            auc = roc_auc_score(y_true, y_pred)
+            all_aucs.append(auc)
+            
+            # Interpolate TPR at mean FPR
+            interp_tpr = np.interp(mean_fpr, fpr, tpr)
+            interp_tpr[0] = 0.0
+            all_tprs.append(interp_tpr)
+            
+            # Plot individual fold
+            ax.plot(fpr, tpr, color=colors[i], alpha=0.6, linewidth=1.5,
+                   label=f'Fold {fold_idx} (AUC = {auc:.3f})')
+    
+    # Plot random classifier
+    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, linewidth=2, label='Random')
+    
+    # Plot mean ROC
+    if all_tprs:
+        mean_tpr = np.mean(all_tprs, axis=0)
+        mean_tpr[-1] = 1.0
+        mean_auc = np.mean(all_aucs)
+        std_auc = np.std(all_aucs)
+        
+        ax.plot(mean_fpr, mean_tpr, 'b-', linewidth=3,
+               label=f'Mean (AUC = {mean_auc:.3f} ± {std_auc:.3f})')
+        
+        # Plot std deviation
+        std_tpr = np.std(all_tprs, axis=0)
+        tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+        tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+        ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='blue', alpha=0.2,
+                        label='± 1 std. dev.')
+    
+    ax.set_xlabel('False Positive Rate', fontsize=13)
+    ax.set_ylabel('True Positive Rate', fontsize=13)
+    ax.set_title('Test Set ROC Curves - All Folds', fontsize=15, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\nAggregate test ROC plot saved to: {save_path}")
+
+
+def plot_aggregate_confusion_matrices(results_dir: Path, fold_results: list, save_path: Path):
+    """
+    Plot confusion matrices for all folds in a grid
+    Shows both default threshold (0.5) and optimal threshold
+    Includes aggregate (summed) confusion matrices across folds
+    """
+    n_folds = len(fold_results)
+
+    # Create figure with 2 rows and n_folds + 1 columns (last column = sum)
+    fig, axes = plt.subplots(2, n_folds + 1, figsize=(4 * (n_folds + 1), 8))
+
+    if n_folds == 1:
+        axes = axes.reshape(2, 2)
+
+    # Initialize aggregate confusion matrices
+    cm_default_sum = np.zeros((2, 2), dtype=int)
+    cm_optimal_sum = np.zeros((2, 2), dtype=int)
+
+    for i, result in enumerate(fold_results):
+        fold_idx = result['fold_idx']
+        fold_dir = results_dir / f"fold_{fold_idx}"
+        predictions_file = fold_dir / "test_predictions.csv"
+
+        if predictions_file.exists():
+            pred_df = pd.read_csv(predictions_file)
+            y_true = pred_df['true_label'].values
+            y_pred_prob = pred_df['predicted_prob'].values
+            optimal_threshold = result['optimal_threshold']
+
+            # ---- Default threshold (0.5)
+            y_pred_default = (y_pred_prob >= 0.5).astype(int)
+            cm_default = confusion_matrix(y_true, y_pred_default)
+            cm_default_sum += cm_default
+
+            sns.heatmap(
+                cm_default, annot=True, fmt='d', cmap='Blues',
+                ax=axes[0, i], cbar=False,
+                xticklabels=['No Prog', 'Prog'],
+                yticklabels=['No Prog', 'Prog']
+            )
+            axes[0, i].set_title(f'Fold {fold_idx}\nThreshold = 0.5', fontsize=11, fontweight='bold')
+            if i == 0:
+                axes[0, i].set_ylabel('True Label', fontsize=11)
+            axes[0, i].set_xlabel('Predicted', fontsize=10)
+
+            # ---- Optimal threshold
+            y_pred_optimal = (y_pred_prob >= optimal_threshold).astype(int)
+            cm_optimal = confusion_matrix(y_true, y_pred_optimal)
+            cm_optimal_sum += cm_optimal
+
+            sns.heatmap(
+                cm_optimal, annot=True, fmt='d', cmap='Greens',
+                ax=axes[1, i], cbar=False,
+                xticklabels=['No Prog', 'Prog'],
+                yticklabels=['No Prog', 'Prog']
+            )
+            axes[1, i].set_title(
+                f'Fold {fold_idx}\nThreshold = {optimal_threshold:.3f}',
+                fontsize=11, fontweight='bold'
+            )
+            if i == 0:
+                axes[1, i].set_ylabel('True Label', fontsize=11)
+            axes[1, i].set_xlabel('Predicted', fontsize=10)
+
+    # ---- Plot aggregate (summed) matrices in last column
+    sns.heatmap(
+        cm_default_sum, annot=True, fmt='d', cmap='Blues',
+        ax=axes[0, -1], cbar=False,
+        xticklabels=['No Prog', 'Prog'],
+        yticklabels=['No Prog', 'Prog']
+    )
+    axes[0, -1].set_title('Sum (All Folds)\nThreshold = 0.5', fontsize=11, fontweight='bold')
+    axes[0, -1].set_xlabel('Predicted', fontsize=10)
+
+    sns.heatmap(
+        cm_optimal_sum, annot=True, fmt='d', cmap='Greens',
+        ax=axes[1, -1], cbar=False,
+        xticklabels=['No Prog', 'Prog'],
+        yticklabels=['No Prog', 'Prog']
+    )
+    axes[1, -1].set_title('Sum (All Folds)\nOptimal Thresholds', fontsize=11, fontweight='bold')
+    axes[1, -1].set_xlabel('Predicted', fontsize=10)
+
+    plt.suptitle(
+        'Confusion Matrices - All Folds\nTop: Default (0.5) | Bottom: Optimal | Last Column: Sum',
+        fontsize=14, fontweight='bold', y=0.995
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Aggregate confusion matrices saved to: {save_path}")
+
+
+
+def plot_aggregate_metrics_comparison(fold_results: list, save_path: Path):
+    """
+    Plot comparison of metrics across folds (default vs optimal threshold)
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    
+    metrics_to_plot = ['auc', 'accuracy', 'precision', 'recall', 'f1', 'specificity']
+    titles = ['AUC', 'Accuracy', 'Precision', 'Recall', 'F1-Score', 'Specificity']
+    
+    for idx, (metric, title) in enumerate(zip(metrics_to_plot, titles)):
+        row = idx // 3
+        col = idx % 3
+        ax = axes[row, col]
+        
+        folds = [r['fold_idx'] for r in fold_results]
+        default_values = [r['test_metrics_default'][metric] for r in fold_results]
+        optimal_values = [r['test_metrics_optimal'][metric] for r in fold_results]
+        
+        x = np.arange(len(folds))
+        width = 0.35
+        
+        ax.bar(x - width/2, default_values, width, label='Default (0.5)', 
+               alpha=0.8, color='steelblue')
+        ax.bar(x + width/2, optimal_values, width, label='Optimal', 
+               alpha=0.8, color='seagreen')
+        
+        # Add mean lines
+        ax.axhline(y=np.mean(default_values), color='steelblue', 
+                   linestyle='--', alpha=0.5, linewidth=2)
+        ax.axhline(y=np.mean(optimal_values), color='seagreen', 
+                   linestyle='--', alpha=0.5, linewidth=2)
+        
+        ax.set_xlabel('Fold', fontsize=11)
+        ax.set_ylabel(title, fontsize=11)
+        ax.set_title(f'{title}\n(Mean: Default={np.mean(default_values):.3f}, '
+                    f'Optimal={np.mean(optimal_values):.3f})', 
+                    fontsize=11, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'{f}' for f in folds])
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylim(0, 1.0)
+    
+    plt.suptitle('Test Metrics Comparison Across Folds\nDefault vs Optimal Threshold', 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Metrics comparison plot saved to: {save_path}")

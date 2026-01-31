@@ -1,0 +1,25 @@
+parameter,value
+gt_path,D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv
+ct_scan_path,D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy\extracted_npy
+patient_features_path,D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Slope_Prediction\patient_features.csv
+kfold_splits_path,D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\kfold_splits.pkl
+resume_from_checkpoint,True
+backbone,resnet50
+image_size,"(224, 224)"
+features_save_path,D:\FrancescoP\ImagingBased-ProgressionPrediction\Training\CNN_Features\slice_features_resnet50.csv
+results_save_dir,D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold
+feature_dim,2048
+aggregation,max
+hidden_dims,"[128, 64]"
+dropout,0.3
+use_batch_norm,True
+batch_size,16
+learning_rate,1e-05
+weight_decay,0.001
+epochs,100
+early_stopping_patience,20
+label_smoothing,0.1
+use_scheduler,True
+scheduler_patience,5
+scheduler_factor,0.5
+scheduler_min_lr,1e-06

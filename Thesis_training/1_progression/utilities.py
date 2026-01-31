@@ -362,6 +362,9 @@ class CNNFeatureExtractor:
             model = models.efficientnet_b1(pretrained=True)
             model = nn.Sequential(*list(model.children())[:-1])
         
+        elif self.model_name == 'efficientnet_b0':
+            model = models.efficientnet_b0(pretrained=True)
+            model = nn.Sequential(*list(model.children())[:-1])
         else:
             raise ValueError(f"Unknown model: {self.model_name}")
         
@@ -634,10 +637,12 @@ def create_dataloaders(
     return train_loader, val_loader, test_loader
 
 
-def compute_class_weights(features_df: pd.DataFrame, patient_ids: List[str]) -> Tuple[float, float]:
-    """
+"""
+    Previously defined in utilities.py, now integrated here for completeness
+    def compute_class_weights(features_df: pd.DataFrame, patient_ids: List[str]) -> Tuple[float, float]:
+    
     Compute class weights for imbalanced data
-    """
+    
     # Get labels for patients
     patient_labels = features_df[features_df['patient_id'].isin(patient_ids)].groupby('patient_id')['gt_has_progressed'].first()
     
@@ -657,3 +662,25 @@ def compute_class_weights(features_df: pd.DataFrame, patient_ids: List[str]) -> 
     print(f"  Progression: {weight_pos:.4f}")
     
     return (weight_neg, weight_pos)
+"""
+
+
+def compute_class_weights(features_df, patient_ids):
+    """Compute class weights to handle imbalance"""
+    patient_labels = features_df[features_df['patient_id'].isin(patient_ids)].groupby('patient_id')['gt_has_progressed'].first()
+    
+    # Get label counts
+    labels = patient_labels
+    pos_count = labels.sum()
+    neg_count = len(labels) - pos_count
+    
+    # Compute weights
+    total = len(labels)
+    weight_pos = total / (2 * pos_count) if pos_count > 0 else 1.0
+    weight_neg = total / (2 * neg_count) if neg_count > 0 else 1.0
+    
+    # More aggressive weighting for severe imbalance
+    if pos_count < neg_count * 0.3:  # If < 30% positive
+        weight_pos *= 1.5  # Boost positive class more
+    
+    return torch.tensor([weight_neg, weight_pos])

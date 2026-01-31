@@ -1,0 +1,124 @@
+======================================================================
+STEP 5: AGGREGATING RESULTS ACROSS ALL FOLDS
+======================================================================
+
+======================================================================
+AGGREGATE RESULTS ACROSS ALL FOLDS
+======================================================================
+
+Summary Statistics:
+                    Metric     Mean      Std
+            Validation AUC 0.547176 0.163082
+         Optimal Threshold 0.535157 0.076132
+                                NaN      NaN
+        Test AUC (Default) 0.530338 0.101162
+   Test Accuracy (Default) 0.474265 0.139706
+  Test Precision (Default) 0.378584 0.100082
+     Test Recall (Default) 0.598333 0.281977
+         Test F1 (Default) 0.402306 0.063402
+Test Specificity (Default) 0.429953 0.329062
+                                NaN      NaN
+        Test AUC (Optimal) 0.530338 0.101162
+   Test Accuracy (Optimal) 0.549265 0.116622
+  Test Precision (Optimal) 0.407253 0.088401
+     Test Recall (Optimal) 0.518333 0.202100
+         Test F1 (Optimal) 0.412782 0.069743
+Test Specificity (Optimal) 0.577156 0.243255
+
+Results saved to:
+  - D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_metrics_summary.csv
+  - D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\detailed_fold_results.csv
+
+======================================================================
+CREATING AGGREGATE VISUALIZATIONS
+======================================================================
+
+Aggregate test ROC plot saved to: D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_test_roc_curves.png
+Aggregate confusion matrices saved to: D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_confusion_matrices.png
+Metrics comparison plot saved to: D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_metrics_comparison.png
+
+======================================================================
+AGGREGATE VISUALIZATIONS COMPLETE
+======================================================================
+
+Generated plots:
+  - D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_test_roc_curves.png
+  - D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_confusion_matrices.png
+  - D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\aggregate_metrics_comparison.png
+
+======================================================================
+K-FOLD CROSS-VALIDATION SUMMARY
+======================================================================
+
+======================================================================
+VALIDATION METRICS
+======================================================================
+Val AUC: 0.5472 ± 0.1823
+Optimal Threshold: 0.5352 ± 0.0851
+
+======================================================================
+TEST METRICS - DEFAULT THRESHOLD (0.5)
+======================================================================
+AUC:         0.5303 ± 0.1131
+Accuracy:    0.4743 ± 0.1562
+Precision:   0.3786 ± 0.1119
+Recall:      0.5983 ± 0.3153
+F1-Score:    0.4023 ± 0.0709
+Specificity: 0.4300 ± 0.3679
+
+======================================================================
+TEST METRICS - OPTIMAL THRESHOLD (from validation)
+======================================================================
+AUC:         0.5303 ± 0.1131
+Accuracy:    0.5493 ± 0.1304
+Precision:   0.4073 ± 0.0988
+Recall:      0.5183 ± 0.2260
+F1-Score:    0.4128 ± 0.0780
+Specificity: 0.5772 ± 0.2720
+
+======================================================================
+PERFORMANCE INTERPRETATION
+======================================================================
+
+Default Threshold (0.5):
+  Mean Test AUC: 0.5303
+  ✗ Poor discrimination
+
+Optimal Threshold (from validation):
+  Mean Test AUC: 0.5303
+  ✗ Poor discrimination
+
+======================================================================
+THRESHOLD STRATEGY COMPARISON
+======================================================================
+
+Average improvement using optimal threshold:
+  Accuracy:    0.0750
+  Precision:   0.0287
+  Recall:      -0.0800
+  F1-Score:    0.0105
+  Specificity: 0.1472
+
+======================================================================
+FILES CREATED
+======================================================================
+
+Results directory: D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2
+
+Per-fold outputs (in fold_X/ subdirectories):
+  - best_model.pth (checkpoint with all metrics)
+  - training_history.png
+  - validation_roc_threshold_analysis.png
+  - test_evaluation_default_threshold.png
+  - test_evaluation_optimal_threshold.png
+  - test_predictions.csv
+
+Aggregate outputs:
+  - aggregate_metrics_summary.csv
+  - detailed_fold_results.csv
+
+======================================================================
+TRAINING COMPLETE!
+======================================================================
+
+Configuration saved to: D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression\results_resnet50_kfold_config2\training_config.csv                                                                                                                                               g.csv
