@@ -1,0 +1,13 @@
+{
+  "hidden_dims": [
+    256,
+    128
+  ],
+  "dropout": 0.7,
+  "learning_rate": 0.0005,
+  "weight_decay": 0.05,
+  "label_smoothing": 0.2,
+  "use_batch_norm": true,
+  "early_stopping_patience": 10,
+  "note": "Model uses per-slice prediction with max aggregation"
+}

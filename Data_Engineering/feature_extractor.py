@@ -305,14 +305,11 @@ tr_csv['Where'] = 'train'
 #Unique patient list
 tr_patient_ids = tr_csv.Patient.unique().tolist()
 
-#Image Feature extraction
-percentile_range_1 = np.linspace(0.3,0.6,11)
-percentile_range_2 = range(30,63, 3)
-percentile_range = [(round(x,2),y) for x,y in zip(percentile_range_1,percentile_range_2)]
+#Image Feature extraction - processing all slices
 
 def build_image_features_for_split(split_name, patient_ids):
     """
-    Calcola le feature delle immagini (30–60 percentile) per ogni paziente in train o test.
+    Calcola le feature delle immagini per tutti gli slice di ogni paziente in train o test.
     
     split_name : 'train' o 'test'
     patient_ids: lista di ID pazienti
@@ -322,16 +319,14 @@ def build_image_features_for_split(split_name, patient_ids):
 
     for pid in patient_ids:
         lung_list, num_t_pixels_list, tissue_by_total_list, tissue_by_lung_list = [], [], [], []
-        flag = -1
         mean_list, skewness_list, kurtosis_list = [], [], []
 
-        for perc in percentile_range:
-            img_no = get_img(perc[0], pid, split_name)
-            if img_no == flag:  # stessa slice già usata
-                continue
-            flag = img_no
-
-            dcm_path = os.path.join(path, f"{split_name}/{pid}/{img_no}.dcm")
+        # Get all DICOM files for this patient
+        dcm_files = glob.glob(os.path.join(path, f"{split_name}/{pid}/*.dcm"))
+        
+        for dcm_path in dcm_files:
+            # Extract image number from filename
+            img_no = int(os.path.splitext(os.path.basename(dcm_path))[0])
 
             try:
                 img = load_image(dcm_path)
@@ -342,7 +337,7 @@ def build_image_features_for_split(split_name, patient_ids):
             try:
                 mask,lung_pixels, area_ratio, num_t_pixels, tissue_by_total, tissue_by_lung = make_lungmask(img, display=False)
                 if not math.isnan(lung_pixels):
-                    lung_list.append((perc[0], lung_pixels))
+                    lung_list.append(lung_pixels)
                 if not math.isnan(num_t_pixels):
                     num_t_pixels_list.append(num_t_pixels)
                 if not math.isnan(tissue_by_total):
@@ -372,56 +367,53 @@ def build_image_features_for_split(split_name, patient_ids):
             slice_thickness = 0.0
             pixel_spacing   = 0.0
 
-        # Medie
+        # Calculate average features across all slices
         try:
-            Avg_NumTissuePixel_30_60   = round(sum(num_t_pixels_list)/len(num_t_pixels_list),4)
-            Avg_Tissue_30_60           = round((sum(num_t_pixels_list)/len(num_t_pixels_list))*pixel_spacing,4)
-            Avg_Tissue_thickness_30_60 = round((sum(num_t_pixels_list)/len(num_t_pixels_list))*pixel_spacing*slice_thickness,4)
-            Avg_TissueByTotal_30_60    = round(sum(tissue_by_total_list)/len(tissue_by_total_list),4)
-            Avg_TissueByLung_30_60     = round(sum(tissue_by_lung_list)/len(tissue_by_lung_list),4)
+            Avg_NumTissuePixel   = round(sum(num_t_pixels_list)/len(num_t_pixels_list),4)
+            Avg_Tissue           = round((sum(num_t_pixels_list)/len(num_t_pixels_list))*pixel_spacing,4)
+            Avg_Tissue_thickness = round((sum(num_t_pixels_list)/len(num_t_pixels_list))*pixel_spacing*slice_thickness,4)
+            Avg_TissueByTotal    = round(sum(tissue_by_total_list)/len(tissue_by_total_list),4)
+            Avg_TissueByLung     = round(sum(tissue_by_lung_list)/len(tissue_by_lung_list),4)
         except:
-            Avg_NumTissuePixel_30_60 = Avg_Tissue_30_60 = Avg_Tissue_thickness_30_60 = 0
-            Avg_TissueByTotal_30_60 = Avg_TissueByLung_30_60 = 0
+            Avg_NumTissuePixel = Avg_Tissue = Avg_Tissue_thickness = 0
+            Avg_TissueByTotal = Avg_TissueByLung = 0
             
             
         try:
-            Avg_Mean_30_60 = round(sum(mean_list)/len(mean_list), 4)
-            Avg_Skew_30_60 = round(sum(skewness_list)/len(skewness_list), 4)
-            Avg_Kurtosis_30_60 = round(sum(kurtosis_list)/len(kurtosis_list), 4)
-            print(Avg_Mean_30_60, Avg_Skew_30_60, Avg_Kurtosis_30_60)
+            Avg_Mean = round(sum(mean_list)/len(mean_list), 4)
+            Avg_Skew = round(sum(skewness_list)/len(skewness_list), 4)
+            Avg_Kurtosis = round(sum(kurtosis_list)/len(kurtosis_list), 4)
+            print(Avg_Mean, Avg_Skew, Avg_Kurtosis)
         except:
-            Avg_Mean_30_60 = 0
-            Avg_Skew_30_60 = 0
-            Avg_Kurtosis_30_60 = 0
+            Avg_Mean = 0
+            Avg_Skew = 0
+            Avg_Kurtosis = 0
 
-        # Numero di slice tra due percentili
-        try:
-            num_im = num_img_bw_perc(percentile_range[0][0], percentile_range[1][0], pid, split_name)
-        except:
-            num_im = 0
-        if num_im == 0:
-            num_im = 1
+        # Total number of slices processed
+        num_slices = len(lung_list)
+        if num_slices == 0:
+            num_slices = 1
 
-        # Volume approssimato
+        # Volume approssimato (sum of all lung pixels across slices)
         approx_vol = 0
-        for x in lung_list[:-1]:
-            approx_vol += (x[1] * pixel_spacing * slice_thickness * num_im)
+        for lung_pix in lung_list:
+            approx_vol += (lung_pix * pixel_spacing * slice_thickness)
 
         patient_dict = {
             "Patient": pid,
             "Data": split_name,
             "SliceThickness": slice_thickness,
             "PixelSpacing": pixel_spacing,
-            "NumImgBw5Prec": num_im,
-            "ApproxVol_30_60": round(approx_vol,4),
-            "Avg_NumTissuePixel_30_60": Avg_NumTissuePixel_30_60,
-            "Avg_Tissue_30_60": Avg_Tissue_30_60,
-            "Avg_Tissue_thickness_30_60": Avg_Tissue_thickness_30_60,
-            "Avg_TissueByTotal_30_60": Avg_TissueByTotal_30_60,
-            "Avg_TissueByLung_30_60": Avg_TissueByLung_30_60,
-            "Mean_30_60": Avg_Mean_30_60,
-            "Skew_30_60": Avg_Skew_30_60,
-            "Kurtosis_30_60": Avg_Kurtosis_30_60
+            "NumSlices": num_slices,
+            "ApproxVol": round(approx_vol,4),
+            "Avg_NumTissuePixel": Avg_NumTissuePixel,
+            "Avg_Tissue": Avg_Tissue,
+            "Avg_Tissue_thickness": Avg_Tissue_thickness,
+            "Avg_TissueByTotal": Avg_TissueByTotal,
+            "Avg_TissueByLung": Avg_TissueByLung,
+            "Mean": Avg_Mean,
+            "Skew": Avg_Skew,
+            "Kurtosis": Avg_Kurtosis
         }
         image_data.append(patient_dict)
 
@@ -434,7 +426,17 @@ def build_image_features_for_split(split_name, patient_ids):
 
 image_data_df_train = build_image_features_for_split('train', tr_patient_ids)
 
-image_data_df_train.to_csv("patient_features_30_60.csv",index=False)
+image_data_df_train.to_csv("patient_features_all_slices.csv",index=False)
+
+# Extract features for patients in ground_truth.csv
+ground_truth_csv = pd.read_csv("D:/FrancescoP/ImagingBased-ProgressionPrediction/Thesis_training/Label_ground_truth/ground_truth.csv")
+ground_truth_patient_ids = ground_truth_csv.PatientID.unique().tolist()
+
+print(f"\nProcessing {len(ground_truth_patient_ids)} patients from ground_truth.csv...")
+image_data_df_ground_truth = build_image_features_for_split('train', ground_truth_patient_ids)
+
+image_data_df_ground_truth.to_csv("patient_features_ground_truth_all_slices.csv", index=False)
+print(f"Ground truth features saved to patient_features_ground_truth_all_slices.csv")
 
 
 #Add other features 

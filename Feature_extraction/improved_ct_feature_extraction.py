@@ -25,9 +25,9 @@ class Config:
     N_COLS = 512
     
     # Regional percentile ranges for analysis
-    UPPER_LUNG = (0.15, 0.35)   # Upper 15-35%
-    MIDDLE_LUNG = (0.35, 0.65)  # Middle 35-65%
-    LOWER_LUNG = (0.65, 0.85)   # Lower 65-85%
+    UPPER_LUNG = (0, 0.3)   # Upper 15-35%
+    MIDDLE_LUNG = (0.33, 0.66)  # Middle 35-65%
+    LOWER_LUNG = (0.66, 0.85)   # Lower 65-85%
     
     # Tissue threshold for fibrosis detection
     TISSUE_THRESHOLD = 0.35

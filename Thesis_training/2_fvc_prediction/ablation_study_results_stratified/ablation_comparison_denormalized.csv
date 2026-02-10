@@ -1,0 +1,5 @@
+Configuration,Description,Val_MAE_mL,Test_MAE_mL,Test_RMSE_mL,Test_R2,Val_MAE_norm,Test_MAE_norm,Test_RMSE_norm
+cnn_only,CNN features + FVC baseline only,93.98 ± 29.78,274.19 ± 58.20,346.84 ± 67.63,0.8059 ± 0.0719,0.1115 ± 0.0353,0.3252 ± 0.0690,0.4113 ± 0.0802
+cnn_hand,CNN + Hand-crafted features + FVC baseline,109.74 ± 55.96,281.22 ± 26.49,345.69 ± 29.54,0.7995 ± 0.0836,0.1301 ± 0.0664,0.3335 ± 0.0314,0.4100 ± 0.0350
+cnn_demo,CNN + Demographics + FVC baseline,117.70 ± 50.89,289.81 ± 40.51,352.21 ± 47.92,0.7997 ± 0.0666,0.1396 ± 0.0604,0.3437 ± 0.0480,0.4177 ± 0.0568
+full,CNN + Hand-crafted + Demographics + FVC baseline (full),95.12 ± 29.24,291.69 ± 54.23,365.62 ± 101.10,0.7978 ± 0.0549,0.1128 ± 0.0347,0.3459 ± 0.0643,0.4336 ± 0.1199
