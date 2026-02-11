@@ -429,7 +429,7 @@ image_data_df_train = build_image_features_for_split('train', tr_patient_ids)
 image_data_df_train.to_csv("patient_features_all_slices.csv",index=False)
 
 # Extract features for patients in ground_truth.csv
-ground_truth_csv = pd.read_csv("D:/FrancescoP/ImagingBased-ProgressionPrediction/Thesis_training/Label_ground_truth/ground_truth.csv")
+ground_truth_csv = pd.read_csv(r"C:\Users\frank\OneDrive\Desktop\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv")
 ground_truth_patient_ids = ground_truth_csv.PatientID.unique().tolist()
 
 print(f"\nProcessing {len(ground_truth_patient_ids)} patients from ground_truth.csv...")
