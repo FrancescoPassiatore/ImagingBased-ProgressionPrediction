@@ -26,27 +26,31 @@ from model_train import (
     
     )
 
-
-# Feature configurations
-ABLATION_CONFIGS = {
-    'cnn_only': {
+"""'cnn_only': {
         'use_cnn_features': True,
         'use_hand_features': False,
         'use_demographics': False,
         'description': 'CNN features only (baseline)'
-    },
-    'cnn_hand': {
-        'use_cnn_features': True,
-        'use_hand_features': True,
-        'use_demographics': False,
-        'description': 'CNN + Hand-crafted features'
     },
     'cnn_demo': {
         'use_cnn_features': True,
         'use_hand_features': False,
         'use_demographics': True,
         'description': 'CNN + Demographics'
+    },"""
+
+# Feature configurations
+ABLATION_CONFIGS = {
+
+    
+    
+    'cnn_hand': {
+        'use_cnn_features': True,
+        'use_hand_features': True,
+        'use_demographics': False,
+        'description': 'CNN + Hand-crafted features'
     },
+    
     'full': {
         'use_cnn_features': True,
         'use_hand_features': True,
@@ -60,7 +64,7 @@ BASE_CONFIG = {
     # Paths
     "gt_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv"),
     "ct_scan_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy_full_dataset"),
-    "patient_features_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\patient_features_30_60.csv"),
+    "patient_features_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\patient_features_all_slices.csv"),
     "kfold_splits_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\kfold_splits_stratified.pkl"),
     "train_csv_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\train.csv"),
     
@@ -69,7 +73,7 @@ BASE_CONFIG = {
     'image_size': (224, 224),
     'pooling_type': 'max',
     'use_feature_branches': True,
-    'use_ktop': True,
+    'use_ktop': False,
     
     # Training parameters
     'batch_size': 16,
@@ -85,7 +89,7 @@ BASE_CONFIG = {
     
     # Model architecture
     'hidden_dims': [256, 128,64],
-    'dropout': 0.6,
+    'dropout': 0.7,
     'use_batch_norm': True,
     
     'resume_from_checkpoint': True,
@@ -95,15 +99,15 @@ BASE_CONFIG = {
 
 # Hand-crafted features da normalizzare
 HAND_FEATURE_COLS = [
-    'ApproxVol_30_60',
-    'Avg_NumTissuePixel_30_60',
-    'Avg_Tissue_30_60',
-    'Avg_Tissue_thickness_30_60',
-    'Avg_TissueByTotal_30_60',
-    'Avg_TissueByLung_30_60',
-    'Mean_30_60',
-    'Skew_30_60',
-    'Kurtosis_30_60'
+    'ApproxVol',
+    'Avg_NumTissuePixel',
+    'Avg_Tissue',
+    'Avg_Tissue_thickness',
+    'Avg_TissueByTotal',
+    'Avg_TissueByLung',
+    'Mean',
+    'Skew',
+    'Kurtosis'
 ]
 
 # Demographic features
@@ -390,6 +394,11 @@ def normalize_features_per_fold(
         # Store encoding info in scalers dict
         scalers['demo_encoding'] = encoding_info
         
+        # DEBUG: Verify encoding_info after preprocessing
+        print(f"  [DEBUG] encoding_info keys after preprocessing: {list(encoding_info.keys())}")
+        if 'smoking_columns' in encoding_info:
+            print(f"  [DEBUG] Smoking columns stored: {encoding_info['smoking_columns']}")
+        
         print(f"  ✓ Demographics preprocessed with proper centering and encoding")
     
     return result_df, scalers
@@ -477,6 +486,12 @@ def create_feature_set_for_fold(
             
             # Extract encoding info
             encoding_info = scalers.get('demo_encoding', {})
+            
+            # DEBUG: Verify encoding_info extraction
+            if demo_to_add:
+                print(f"\n[DEBUG] Extracted encoding_info keys: {list(encoding_info.keys())}")
+                if 'smoking_columns' in encoding_info:
+                    print(f"[DEBUG] Smoking columns in encoding_info: {encoding_info['smoking_columns']}")
     
     # Feature dimension summary
     cnn_cols = [c for c in result_df.columns if c.startswith('cnn_feature_')]
@@ -520,6 +535,14 @@ def train_single_fold(
         demo_feature_cols = DEMO_FEATURE_COLS
     if encoding_info is None:
         encoding_info = {}
+    
+    # DEBUG: Verify encoding_info content
+    if encoding_info:
+        print(f"\n[DEBUG] encoding_info received: {list(encoding_info.keys())}")
+        if 'smoking_columns' in encoding_info:
+            print(f"[DEBUG] Smoking columns: {encoding_info['smoking_columns']}")
+    else:
+        print("\n[DEBUG] WARNING: encoding_info is empty!")
     
     fold_dir = results_dir / f"fold_{fold_idx}"
     fold_dir.mkdir(parents=True, exist_ok=True)
@@ -571,16 +594,20 @@ def train_single_fold(
     
     # Identify available features
     available_hand_cols = [c for c in hand_feature_cols if c in features_df.columns]
-    available_demo_cols = [c for c in demo_feature_cols if c in features_df.columns]
+    
+    # For demographics, DON'T filter by column names since they've been preprocessed
+    # (Age -> Age_normalized, Sex -> Sex_encoded, SmokingStatus -> Smoking_0/1/2)
+    # The dataset will handle mapping original names to preprocessed columns
     
     print(f"\nFeature availability:")
     print(f"  Hand-crafted: {len(available_hand_cols)}/{len(hand_feature_cols)}")
-    print(f"  Demographics: {len(available_demo_cols)}/{len(demo_feature_cols)}")
+    print(f"  Demographics: {len(demo_feature_cols)}/{len(demo_feature_cols)}")
     
     # Compute class weights
     class_weights = compute_class_weights(features_df, train_ids)
     
     # Create dataloaders
+    # Pass ORIGINAL demographic column names - the dataset handles preprocessing mapping
     train_loader, val_loader, test_loader = create_dataloaders(
         features_df,
         train_ids=train_ids,
@@ -589,7 +616,7 @@ def train_single_fold(
         batch_size=config['batch_size'],
         num_workers=4,
         hand_feature_cols=available_hand_cols,
-        demo_feature_cols=available_demo_cols,
+        demo_feature_cols=demo_feature_cols,  # Pass original names, not filtered
         encoding_info=encoding_info
     )
     
@@ -785,7 +812,8 @@ def run_ablation_study(
                 fold_idx=fold_idx,
                 config=config,
                 results_dir=ablation_results_dir,
-                resume_from_checkpoint=config['resume_from_checkpoint']
+                resume_from_checkpoint=config['resume_from_checkpoint'],
+                encoding_info=encoding_info  # Pass encoding info with smoking_columns
             )
             
             fold_results.append(result)
@@ -884,7 +912,7 @@ def create_ablation_comparison(all_results: dict, results_dir: Path):
     print(f"\nVisualization saved!")
 
 def main():
-    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression_maxpooling\full_slices_training_3")
+    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression_maxpooling\full_slices_training_3_max")
     results_base_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
@@ -911,7 +939,7 @@ def main():
     slice_features_df = feature_extractor.extract_features_patient_grouping(
         patient_data=patient_data,
         patients_per_batch=4,
-        save_path=None
+        save_path=results_base_dir / "slice_features.csv"
     )
     
     # Load patient features and demographics

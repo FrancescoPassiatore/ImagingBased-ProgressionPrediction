@@ -350,7 +350,7 @@ class CNNFeatureExtractor:
     def _load_model(self):
         """Load pre-trained CNN and remove classification head"""
         if self.model_name == 'resnet50':
-            model = models.resnet50(pretrained=True)
+            model = models.resnet50(weights='DEFAULT')
             # Remove the final FC layer
             model = nn.Sequential(*list(model.children())[:-1])
             
@@ -530,18 +530,21 @@ class PatientSliceDataset(Dataset):
         # AGGIUNGI: Identifica demographic features (with encoding info for preprocessing)
         if demo_feature_cols is None:
             demo_feature_cols = []
-        self.demo_feature_cols = [c for c in demo_feature_cols if c in self.data.columns]
+        self.demo_feature_cols = demo_feature_cols  # Keep original names for reference
         self.encoding_info = encoding_info if encoding_info is not None else {}
         
         # Calculate actual demographic feature dimension (accounting for one-hot encoding)
+        # Check for PREPROCESSED columns (not original names)
         self.demo_feature_dim = 0
-        if 'Age' in self.demo_feature_cols:
+        if 'Age' in demo_feature_cols and 'Age_normalized' in self.data.columns:
             self.demo_feature_dim += 1  # Age_normalized
-        if 'Sex' in self.demo_feature_cols:
+        if 'Sex' in demo_feature_cols and 'Sex_encoded' in self.data.columns:
             self.demo_feature_dim += 1  # Sex_encoded
-        if 'SmokingStatus' in self.demo_feature_cols:
+        if 'SmokingStatus' in demo_feature_cols:
             smoking_cols = self.encoding_info.get('smoking_columns', [])
-            self.demo_feature_dim += len(smoking_cols)  # One-hot encoded (3 features)
+            # Verify smoking columns actually exist in data
+            existing_smoking_cols = [c for c in smoking_cols if c in self.data.columns]
+            self.demo_feature_dim += len(existing_smoking_cols)  # One-hot encoded (3 features)
         
         # Progression labels
         self.labels = self.data.groupby('patient_id')['gt_has_progressed'].first()
@@ -551,6 +554,23 @@ class PatientSliceDataset(Dataset):
         print(f"  CNN feature dimension: {self.cnn_feature_dim}")
         print(f"  Hand-crafted features: {len(self.hand_feature_cols)}")
         print(f"  Demographic features: {self.demo_feature_dim} (preprocessed)")
+        
+        # DEBUG: Show demographic breakdown
+        if demo_feature_cols:
+            print(f"  Demographic breakdown:")
+            if 'Age' in demo_feature_cols:
+                has_age = 'Age_normalized' in self.data.columns
+                print(f"    Age: {'✓' if has_age else '✗'} (Age_normalized)")
+            if 'Sex' in demo_feature_cols:
+                has_sex = 'Sex_encoded' in self.data.columns
+                print(f"    Sex: {'✓' if has_sex else '✗'} (Sex_encoded)")
+            if 'SmokingStatus' in demo_feature_cols:
+                smoking_cols = self.encoding_info.get('smoking_columns', [])
+                existing_cols = [c for c in smoking_cols if c in self.data.columns]
+                print(f"    SmokingStatus: {len(existing_cols)}/{len(smoking_cols)} columns found")
+                if existing_cols:
+                    print(f"      Columns: {existing_cols}")
+        
         print(f"  Total patient-level features: {len(self.hand_feature_cols) + self.demo_feature_dim}")
         print(f"  Progression cases: {self.labels.sum()}")
         
@@ -585,18 +605,19 @@ class PatientSliceDataset(Dataset):
             row = patient_slices.iloc[0]
             
             # Age (normalized)
-            if 'Age_normalized' in row:
+            if 'Age' in self.demo_feature_cols and 'Age_normalized' in row:
                 demo_vals.append(row['Age_normalized'])
             
             # Sex (encoded and centered)
-            if 'Sex_encoded' in row:
+            if 'Sex' in self.demo_feature_cols and 'Sex_encoded' in row:
                 demo_vals.append(row['Sex_encoded'])
             
             # Smoking (one-hot, centered)
-            smoking_cols = self.encoding_info.get('smoking_columns', [])
-            for col in smoking_cols:
-                if col in row:
-                    demo_vals.append(row[col])
+            if 'SmokingStatus' in self.demo_feature_cols:
+                smoking_cols = self.encoding_info.get('smoking_columns', [])
+                for col in smoking_cols:
+                    if col in row:
+                        demo_vals.append(row[col])
             
             demo_features = torch.tensor(demo_vals, dtype=torch.float32) if demo_vals else None
         else:

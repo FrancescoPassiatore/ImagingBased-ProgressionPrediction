@@ -605,6 +605,3 @@ def plot_fusion_weights(fusion_expert: FusionExpert, save_path: Path = None):
         plt.close()
     else:
         plt.show()
-
-
-print("✓ Three-Expert Ensemble module loaded successfully!")

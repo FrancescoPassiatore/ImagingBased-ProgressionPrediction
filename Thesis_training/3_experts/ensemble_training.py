@@ -275,28 +275,23 @@ def train_single_fold_ensemble(
     print(f"  Test: {len(test_ids)} patients")
     
     # =================================================================
-    # EXPERT 1: TRAIN CNN EXPERT
+    # EXPERT 1: TRAIN CNN EXPERT (CNN FEATURES ONLY)
     # =================================================================
     
     print("\n" + "="*70)
-    print("TRAINING EXPERT 1: CNN + DEMOGRAPHICS")
+    print("TRAINING EXPERT 1: CNN ONLY (NO DEMOGRAPHICS)")
     print("="*70)
     
-    # Identify available features
-    available_demo_cols = [c for c in demo_feature_cols if c in features_df.columns]
-    
-    # Calculate actual demographic dimension (accounting for preprocessing)
+    # CNN Expert uses ONLY CNN features, no demographics
     demo_dim = 0
-    if encoding_info and available_demo_cols:
-        if 'Age' in available_demo_cols:
-            demo_dim += 1
-        if 'Sex' in available_demo_cols:
-            demo_dim += 1
-        if 'SmokingStatus' in available_demo_cols:
-            smoking_cols = encoding_info.get('smoking_columns', [])
-            demo_dim += len(smoking_cols)
+    
+    print(f"\nCNN Expert configuration:")
+    print(f"  CNN features: YES")
+    print(f"  Hand-crafted features: NO")
+    print(f"  Demographic features: NO")
     
     # Create dataloaders for CNN
+    # Pass empty list for demographics - CNN expert doesn't use them
     train_loader, val_loader, test_loader = create_dataloaders(
         features_df,
         train_ids=train_ids,
@@ -305,13 +300,17 @@ def train_single_fold_ensemble(
         batch_size=config['batch_size'],
         num_workers=4,
         hand_feature_cols=[],  # CNN expert doesn't use handcrafted features
-        demo_feature_cols=available_demo_cols,
+        demo_feature_cols=[],  # CNN expert doesn't use demographics
         encoding_info=encoding_info
     )
     
     # Get CNN feature dimension from first batch
     sample_batch = next(iter(train_loader))
     cnn_feature_dim = sample_batch['cnn_features'].shape[2]
+    
+    print(f"\n✓ CNN Expert dimensions:")
+    print(f"  CNN feature dimension: {cnn_feature_dim}")
+    print(f"  Demographic dimension: {demo_dim}")
     
     # Create CNN expert
     cnn_expert = CNNExpert(
@@ -358,17 +357,55 @@ def train_single_fold_ensemble(
     print("="*70)
     
     # Prepare features for LightGBM
+    # For LightGBM, we need the PREPROCESSED column names (same as CNN uses internally)
     available_hand_cols = [c for c in hand_feature_cols if c in features_df.columns]
-    lgb_feature_cols = available_hand_cols + available_demo_cols
+    
+    # Build list of preprocessed demographic columns (same preprocessing as CNN)
+    lgb_demo_cols = []
+    if demo_feature_cols:
+        if 'Age' in demo_feature_cols and 'Age_normalized' in features_df.columns:
+            lgb_demo_cols.append('Age_normalized')
+        if 'Sex' in demo_feature_cols and 'Sex_encoded' in features_df.columns:
+            lgb_demo_cols.append('Sex_encoded')
+        if 'SmokingStatus' in demo_feature_cols and encoding_info:
+            smoking_cols = encoding_info.get('smoking_columns', [])
+            existing_smoking = [c for c in smoking_cols if c in features_df.columns]
+            lgb_demo_cols.extend(existing_smoking)
+    
+    lgb_feature_cols = available_hand_cols + lgb_demo_cols
     
     print(f"\nLightGBM features:")
     print(f"  Handcrafted: {len(available_hand_cols)}")
-    print(f"  Demographics: {len(available_demo_cols)}")
+    print(f"  Demographics: {len(lgb_demo_cols)} (preprocessed)")
+    print(f"  Preprocessed demo columns: {lgb_demo_cols}")
     print(f"  Total: {len(lgb_feature_cols)}")
     
-    X_train, y_train = prepare_lgb_features(features_df, train_ids, available_hand_cols, available_demo_cols)
-    X_val, y_val = prepare_lgb_features(features_df, val_ids, available_hand_cols, available_demo_cols)
-    X_test, y_test = prepare_lgb_features(features_df, test_ids, available_hand_cols, available_demo_cols)
+    X_train, y_train = prepare_lgb_features(features_df, train_ids, available_hand_cols, lgb_demo_cols)
+    X_val, y_val = prepare_lgb_features(features_df, val_ids, available_hand_cols, lgb_demo_cols)
+    X_test, y_test = prepare_lgb_features(features_df, test_ids, available_hand_cols, lgb_demo_cols)
+    
+    # Verify LightGBM feature dimensions
+    print(f"\n✓ LightGBM dimension verification:")
+    print(f"  Expected features: {len(lgb_feature_cols)}")
+    print(f"  Actual features from X_train: {X_train.shape[1]}")
+    print(f"  Hand-crafted: {len(available_hand_cols)}")
+    print(f"  Demographics: {len(lgb_demo_cols)}")
+    if X_train.shape[1] != len(lgb_feature_cols):
+        print(f"  ⚠️ WARNING: Feature dimension mismatch!")
+    
+    # Architecture summary
+    print(f"\n{'='*70}")
+    print("EXPERT ARCHITECTURE SUMMARY")
+    print(f"{'='*70}")
+    print(f"CNN Expert:")
+    print(f"  - CNN features only: {cnn_feature_dim} dimensions")
+    print(f"  - Demographics: NO")
+    print(f"\nLightGBM Expert:")
+    print(f"  - Hand-crafted features: {len(available_hand_cols)}")
+    print(f"  - Demographics: {len(lgb_demo_cols)} (preprocessed)")
+    print(f"  - Total: {len(lgb_feature_cols)}")
+    print(f"\nDifferentiated approach: CNN focuses on imaging, LightGBM on tabular data")
+    print(f"{'='*70}")
     
     # Create and train LightGBM expert
     lgb_expert = LightGBMExpert(
@@ -511,5 +548,3 @@ def train_single_fold_ensemble(
         'test_results': test_results
     }
 
-
-print("✓ Training pipeline loaded successfully!")

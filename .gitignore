@@ -4,3 +4,5 @@ __pycache__/
 old_npy/
 extracted_npy_full_dataset.zip
 extracted_npy_full_dataset/
+*.pth
+slice_features.csv

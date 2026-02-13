@@ -30,7 +30,7 @@ CONFIG = {
     'image_size': (224, 224),
     'pooling_type': 'max',
     'hidden_dims': [256, 128, 64],
-    'dropout': 0.6,
+    'dropout': 0.65,
     'use_batch_norm': True,
     
     # Training parameters (CNN)
@@ -38,7 +38,7 @@ CONFIG = {
     'learning_rate': 3.86e-05,
     'weight_decay': 0.0305,
     'epochs': 100,
-    'early_stopping_patience': 20,
+    'early_stopping_patience': 25,
     
     # LightGBM parameters
     'lgb_params': {
@@ -65,15 +65,15 @@ CONFIG = {
 
 # Hand-crafted features
 HAND_FEATURE_COLS = [
-    'ApproxVol',
-    'Avg_NumTissuePixel',
-    'Avg_Tissue',
-    'Avg_Tissue_thickness',
-    'Avg_TissueByTotal',
-    'Avg_TissueByLung',
-    'Mean',
-    'Skew',
-    'Kurtosis'
+    'ApproxVol_30_60',
+    'Avg_NumTissuePixel_30_60',
+    'Avg_Tissue_30_60',
+    'Avg_Tissue_thickness_30_60',
+    'Avg_TissueByTotal_30_60',
+    'Avg_TissueByLung_30_60',
+    'Mean_30_60',
+    'Skew_30_60',
+    'Kurtosis_30_60'
 ]
 
 # Demographic features
@@ -381,9 +381,8 @@ def run_kfold_ensemble(
     fold_results = []
     fold_keys = sorted(kfold_splits.keys())
     
-    for fold_key in fold_keys:
-        fold_idx = int(fold_key.split('_')[1])
-        fold_data = kfold_splits[fold_key]
+    for fold_idx in fold_keys:
+        fold_data = kfold_splits[fold_idx]
         
         # Create feature set for this fold (with proper normalization)
         features_df, encoding_info = create_feature_set_for_fold(
