@@ -1,0 +1,37 @@
+{
+  "ground_truth_path": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Thesis_training\\Label_ground_truth\\ground_truth.csv",
+  "features_path": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Thesis_training\\Dataset\\patient_features_30_60.csv",
+  "demographics_path": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Dataset\\train.csv",
+  "npy_dir": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Dataset\\extracted_npy_full_dataset",
+  "cnn_features_path": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Thesis_training\\1_progression_maxpooling\\slice_features.csv",
+  "kfold_splits_path": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Thesis_training\\Dataset\\kfold_splits_stratified.pkl",
+  "output_dir": "D:\\FrancescoP\\ImagingBased-ProgressionPrediction\\Thesis_training\\Experts_setting\\results_max",
+  "n_folds": 5,
+  "random_seed": 42,
+  "cnn_hand_feature_cols": [],
+  "cnn_demo_feature_cols": [],
+  "lgbm_hand_feature_cols": [
+    "ApproxVol_30_60",
+    "Avg_NumTissuePixel_30_60",
+    "Avg_Tissue_30_60",
+    "Avg_Tissue_thickness_30_60",
+    "Avg_TissueByTotal_30_60",
+    "Avg_TissueByLung_30_60",
+    "Mean_30_60",
+    "Skew_30_60",
+    "Kurtosis_30_60"
+  ],
+  "lgbm_demo_feature_cols": [
+    "Age",
+    "Sex",
+    "SmokingStatus"
+  ],
+  "cnn_epochs": 50,
+  "cnn_patience": 10,
+  "batch_size": 8,
+  "num_workers": 4,
+  "pooling_type": "max",
+  "threshold_strategy": "youden",
+  "fusion_type": "weighted",
+  "device": "cuda"
+}

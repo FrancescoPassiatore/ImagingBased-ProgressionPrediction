@@ -1,0 +1,44 @@
+Config,Description,Mean Val C-index,Std Val C-index,Mean Test C-index,Std Test C-index
+cnn_4stat_only,[CNN Setup A] Mean-pool → 4 statistics (Mean/Var/L2/Entropy) — legacy aggregation,0.6279,0.1496,0.6517,0.1197
+cnn_4stat_sex,[CNN Setup A] 4-stat + Sex,0.6219,0.1006,0.6261,0.1292
+hand_kurtosis_only,[HAND] Kurtosis only — best univariate (Diag 2: C=0.583),0.6239,0.0625,0.6239,0.0625
+cnn_4stat_kurtosis_sex,[COMBO] CNN 4-stat (mean-pool) + Kurtosis + Sex — minimal CNN combo,0.6241,0.0889,0.6233,0.1269
+hand_top2,[HAND] Kurtosis+ApproxVol — top-2 features,0.6025,0.0912,0.6127,0.0759
+cnn_4stat_hand_all_sex,[COMBO] CNN 4-stat (mean-pool) + All 9 handcrafted + Sex,0.5905,0.0369,0.5898,0.1310
+hand_approxvol_only,[HAND] ApproxVol only — 2nd best univariate (C=0.571),0.5848,0.0826,0.5848,0.0826
+cnn_pca5_only,[CNN-ONLY] PCA 5 components — isolate CNN signal,0.5657,0.1018,0.5737,0.0674
+hand_kurtosis_sex,[COMBO] Kurtosis + Sex — minimal EPV-safe model (2 df),0.6169,0.1128,0.5710,0.0701
+hand_skew_only,[HAND] Skew only — sign flips across folds,0.5695,0.0207,0.5695,0.0207
+cnn_3stat_no_l2_hand_all_sex,[NO-L2NORM] Mean-pool → 3 stats (no L2Norm) + All 9 + Sex,0.5742,0.0359,0.5656,0.1402
+hand_reduced_3,[HAND] Kurtosis+ApproxVol+Thickness — reduced 3-feature set,0.5403,0.1111,0.5565,0.0848
+hand_top2_sex,"[COMBO] Kurtosis + ApproxVol + Sex — 3 df, EPV=10",0.5971,0.1441,0.5558,0.0621
+hand_reduced_3_sex,[COMBO] Kurtosis+ApproxVol+Thickness + Sex — reduced 3 + demo,0.5657,0.1433,0.5418,0.0800
+kurtosis_approxvol_thickness_sex,[COMBO] Top-3 individual + Sex,0.5657,0.1433,0.5418,0.0800
+cnn_pca5_hand_all_sex,[CNN Setup C] PCA 5 components + All 9 handcrafted + Sex — more variance retained,0.5333,0.0934,0.5417,0.0900
+hand_mean_only,[HAND] Mean HU only — weakest single (C=0.514),0.4565,0.0559,0.5262,0.0658
+cnn_pca7_hand_all_sex,[PCA-SWEEP] PCA 7 components + All 9 + Sex — more variance,0.5330,0.1013,0.5214,0.0808
+cnn_pca10_hand_all_sex,[PCA-SWEEP] PCA 10 components + All 9 + Sex — high variance retention,0.5403,0.0937,0.5143,0.0604
+cnn_maxpool_no_l2norm_only,[CNN-ONLY] Max-pool → 3 stats (no L2Norm) — isolate CNN signal,0.4819,0.1399,0.5100,0.1418
+cnn_maxpool_4stat,[CNN Setup B] Max-pool → 4 statistics — test variance stability vs mean-pool,0.4820,0.1356,0.5083,0.1395
+cnn_pca3_only,[CNN Setup C] Mean-pool → PCA 3 components — low-rank reduction,0.4961,0.1112,0.5059,0.0685
+cnn_pca2_hand_all_sex,[PCA-SWEEP] PCA 2 components + All 9 + Sex — ultra parsimonious,0.5121,0.1322,0.5051,0.0583
+hand_lungfrac_only,[HAND] TissueByLung only — borderline (C=0.518),0.4636,0.0750,0.5024,0.0833
+cnn_pca3_hand_all_sex,[CNN Setup C] PCA 3 components + All 9 handcrafted + Sex,0.5100,0.1357,0.4925,0.0458
+hand_all_demo,[COMBO ★ RECOMMENDED] All 9 handcrafted + Sex — best test C-index,0.5214,0.1196,0.4806,0.0806
+demo_all_hand_all,[COMBO] Sex+Age+Smoking + All 9 hand — full combo,0.5214,0.1196,0.4806,0.0806
+hand_all_9,[HAND] All 9 handcrafted — best test C-index in hand-only block,0.4993,0.0912,0.4784,0.0490
+hand_all_9_no_demo,"[COMBO] All 9 handcrafted, no demographics — isolate hand signal",0.4993,0.0912,0.4784,0.0490
+demo_age_only,[DEMO] Age only — unstable sign across folds,0.3885,0.0898,0.4772,0.1414
+demo_sex_only,[DEMO] Sex only — best single demographic (C=0.536),0.5114,0.0697,0.4736,0.0655
+cnn_pca3_sex,[CNN Setup C] PCA 3 components + Sex,0.5135,0.1238,0.4731,0.0350
+cnn_maxpool_4stat_sex,[CNN Setup B] Max-pool → 4 statistics + Sex,0.4696,0.1364,0.4682,0.1089
+cnn_maxpool_4stat_hand_all_sex,[CNN Setup B] Max-pool → 4 statistics + All 9 handcrafted + Sex,0.4702,0.1229,0.4619,0.0902
+hand_thickness_only,[HAND] Thickness only — moderate (C=0.527),0.4517,0.0632,0.4615,0.0696
+cnn_maxpool_3stat_no_l2_hand_all_sex,[NO-L2NORM] Max-pool → 3 stats (no L2Norm) + All 9 + Sex,0.4757,0.1246,0.4565,0.0968
+demo_smoking_only,"[DEMO] SmokingStatus only — inverted, C≈0.493",0.4794,0.0865,0.4559,0.0687
+hand_redundant_cluster,[HAND] NumTissuePixel+Tissue+TissueByTotal — collinear cluster (r>0.85),0.4654,0.0843,0.4529,0.0887
+demo_sex_age,[DEMO] Sex + Age — does Age add to Sex?,0.4156,0.1064,0.4528,0.1276
+demo_all,[DEMO] Sex + Age + SmokingStatus — full demographic block,0.4178,0.1781,0.4408,0.0617
+demo_all_redundant_cluster,[COMBO] Sex+Age+Smoking + collinear cluster — surprise hand block + best demo,0.5123,0.0537,0.4391,0.0949
+demo_all_thickness,[COMBO] Sex+Age+SmokingStatus + Avg_Tissue_Thickness — best demo + best hand,0.4757,0.0745,0.4372,0.0676
+demo_sex_thickness,[COMBO] Sex only + Thickness — isolate Sex vs full demo contribution,0.4757,0.0745,0.4372,0.0676

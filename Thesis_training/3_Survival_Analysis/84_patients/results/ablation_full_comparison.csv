@@ -1,0 +1,30 @@
+Config,Description,Mean Val C-index,Std Val C-index,Mean Test C-index,Std Test C-index
+demo_sex_thickness,[COMBO] Sex only + Thickness — isolate Sex vs full demo contribution,0.5243,0.0745,0.5628,0.0676
+demo_all_thickness,[COMBO] Sex+Age+SmokingStatus + Avg_Tissue_Thickness — best demo + best hand,0.5243,0.0745,0.5628,0.0676
+demo_all_redundant_cluster,[COMBO] Sex+Age+Smoking + collinear cluster — surprise hand block + best demo,0.4877,0.0537,0.5609,0.0949
+demo_all,[DEMO] Sex + Age + SmokingStatus — full demographic block,0.5822,0.1781,0.5592,0.0617
+demo_sex_age,[DEMO] Sex + Age — does Age add to Sex?,0.5844,0.1064,0.5472,0.1276
+hand_redundant_cluster,[HAND] NumTissuePixel+Tissue+TissueByTotal — collinear cluster (r>0.85),0.5346,0.0843,0.5471,0.0887
+demo_smoking_only,"[DEMO] SmokingStatus only — inverted, C≈0.493",0.5206,0.0865,0.5441,0.0687
+hand_thickness_only,[HAND] Thickness only — moderate (C=0.527),0.5483,0.0632,0.5385,0.0696
+demo_sex_only,[DEMO] Sex only — best single demographic (C=0.536),0.4886,0.0697,0.5264,0.0655
+demo_age_only,[DEMO] Age only — unstable sign across folds,0.6115,0.0898,0.5228,0.1414
+hand_all_9_no_demo,"[COMBO] All 9 handcrafted, no demographics — isolate hand signal",0.5007,0.0912,0.5216,0.0490
+hand_all_9,[HAND] All 9 handcrafted — best test C-index in hand-only block,0.5007,0.0912,0.5216,0.0490
+hand_all_demo,[COMBO ★ RECOMMENDED] All 9 handcrafted + Sex — best test C-index,0.4786,0.1196,0.5194,0.0806
+demo_all_hand_all,[COMBO] Sex+Age+Smoking + All 9 hand — full combo,0.4786,0.1196,0.5194,0.0806
+hand_lungfrac_only,[HAND] TissueByLung only — borderline (C=0.518),0.5364,0.0750,0.4976,0.0833
+hand_mean_only,[HAND] Mean HU only — weakest single (C=0.514),0.5435,0.0559,0.4738,0.0658
+hand_reduced_3_sex,[COMBO] Kurtosis+ApproxVol+Thickness + Sex — reduced 3 + demo,0.4343,0.1433,0.4582,0.0800
+kurtosis_approxvol_thickness_sex,[COMBO] Top-3 individual + Sex,0.4343,0.1433,0.4582,0.0800
+hand_top2_sex,"[COMBO] Kurtosis + ApproxVol + Sex — 3 df, EPV=10",0.4029,0.1441,0.4442,0.0621
+hand_reduced_3,[HAND] Kurtosis+ApproxVol+Thickness — reduced 3-feature set,0.4597,0.1111,0.4435,0.0848
+hand_skew_only,[HAND] Skew only — sign flips across folds,0.4305,0.0207,0.4305,0.0207
+hand_kurtosis_sex,[COMBO] Kurtosis + Sex — minimal EPV-safe model (2 df),0.3831,0.1128,0.4290,0.0701
+hand_approxvol_only,[HAND] ApproxVol only — 2nd best univariate (C=0.571),0.4152,0.0826,0.4152,0.0826
+cnn_4stat_hand_all_sex,[COMBO] CNN 4-stat + All 9 handcrafted + Sex,0.4095,0.0369,0.4102,0.1310
+hand_top2,[HAND] Kurtosis+ApproxVol — top-2 features,0.3975,0.0912,0.3873,0.0759
+cnn_4stat_kurtosis_sex,[COMBO] CNN 4-stat + Kurtosis + Sex — minimal CNN combo,0.3759,0.0889,0.3767,0.1269
+hand_kurtosis_only,[HAND] Kurtosis only — best univariate (Diag 2: C=0.583),0.3761,0.0625,0.3761,0.0625
+cnn_4stat_sex,[CNN] 4-stat + Sex,0.3781,0.1006,0.3739,0.1292
+cnn_4stat_only,[CNN] Mean-pool → 4 statistics (Mean/Var/L2/Entropy) — legacy aggregation,0.3721,0.1496,0.3483,0.1197

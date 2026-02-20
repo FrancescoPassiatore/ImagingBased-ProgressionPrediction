@@ -1,0 +1,18 @@
+\begin{table}[h]
+\centering
+\caption{Third Block Ablation Study Results - Comprehensive Metrics}
+\label{tab:third_block_ablation}
+\small
+\begin{tabular}{llccccccc}
+\toprule
+\textbf{Config} & \textbf{Description} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{Specificity} & \textbf{Sensitivity} & \textbf{F1} & \textbf{AUC} \\
+\midrule
+3\_cnn\_hand & CNN $+$ Hand-crafted features & 0.586 ± 0.195 & 0.426 ± 0.369 & 0.440 ± 0.344 & 0.668 ± 0.373 & 0.440 ± 0.344 & 0.375 ± 0.280 & 0.535 ± 0.248 \\
+3\_cnn\_hand\_demo & CNN $+$ Hand-crafted $+$ Demographics (FULL) & 0.585 ± 0.051 & 0.315 ± 0.180 & 0.427 ± 0.329 & 0.667 ± 0.221 & 0.427 ± 0.329 & 0.348 ± 0.223 & 0.457 ± 0.104 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Note: All metrics use optimal threshold determined on validation set
+% Sensitivity = Recall (True Positive Rate)
+% Block 3 experiments combine CNN features with hand-crafted and demographic features

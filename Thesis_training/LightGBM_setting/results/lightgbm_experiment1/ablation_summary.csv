@@ -1,0 +1,9 @@
+Experiment,Description,Mean_AUC,Std_AUC,Mean_F1,Std_F1,Mean_Recall,Std_Recall,Mean_Precision,Std_Precision,Mean_Specificity,Std_Specificity
+cnn_max,CNN max pooling only,0.4531,0.1604,0.2891,0.1748,0.4067,0.3389,0.2482,0.1402,0.4455,0.2545
+cnn_mean,CNN mean pooling only,0.4861,0.1155,0.2600,0.1360,0.2800,0.1771,0.2917,0.1677,0.6955,0.2617
+cnn_pca,CNN max pooling + PCA,0.4189,0.1238,0.3165,0.1663,0.4867,0.2509,0.2350,0.1253,0.3773,0.2801
+demo_only,Demographics only,0.3701,0.1368,0.2260,0.1839,0.3067,0.2839,0.1817,0.1356,0.5212,0.2509
+hand_only,Hand-crafted features only,0.5749,0.1747,0.4195,0.1995,0.4267,0.1769,0.4500,0.2769,0.6727,0.2120
+hand_demo,Hand-crafted + Demographics,0.5336,0.1700,0.3265,0.1531,0.3533,0.2553,0.3667,0.1130,0.6985,0.1627
+best_cnn_hand,Best CNN + Hand-crafted,0.4559,0.0448,0.2888,0.1536,0.3600,0.1855,0.2462,0.1395,0.5636,0.2898
+best_cnn_hand_demo,Best CNN + Hand-crafted + Demographics (FULL),0.5529,0.0995,0.2124,0.1912,0.2667,0.3091,0.2133,0.1759,0.7424,0.3066

@@ -1,0 +1,3 @@
+Configuration,Description,Val_AUC,Test_AUC_Optimal,Test_Acc_Optimal,Test_F1_Optimal
+3_cnn_hand,[BLOCK 3] CNN + Hand-crafted,0.5364646464646464,0.5352525252525252,0.5859477124183006,0.375
+3_cnn_hand_demo,[BLOCK 3] CNN + Hand-crafted + Demographics (FULL),0.49989898989898984,0.45671717171717174,0.5852941176470589,0.34757085020242917

@@ -1,0 +1,17 @@
+metric,value
+val_auc,0.6944444444444444
+optimal_threshold,0.504964292049408
+test_threshold_default,0.5
+test_auc_default,0.23636363636363636
+test_accuracy_default,0.3125
+test_precision_default,0.25
+test_recall_default,0.6
+test_f1_default,0.35294117647058826
+test_specificity_default,0.18181818181818182
+test_threshold_optimal,0.504964292049408
+test_auc_optimal,0.23636363636363636
+test_accuracy_optimal,0.375
+test_precision_optimal,0.2727272727272727
+test_recall_optimal,0.6
+test_f1_optimal,0.375
+test_specificity_optimal,0.2727272727272727

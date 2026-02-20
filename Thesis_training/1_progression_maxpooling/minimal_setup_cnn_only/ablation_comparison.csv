@@ -1,0 +1,2 @@
+Configuration,Description,Val_AUC,Test_AUC_Optimal,Test_Acc_Optimal,Test_F1_Optimal
+cnn_only,CNN features only (baseline),0.5290404040404041,0.41358585858585856,0.4977941176470588,0.18

@@ -1,0 +1,21 @@
+{
+  "best_pooling": "max",
+  "best_auc": 0.5343939393939394,
+  "block_2_results": {
+    "mean": {
+      "config_name": "2_cnn_mean",
+      "mean_auc": 0.48984848484848487,
+      "std_auc": 0.11823580740382089
+    },
+    "max": {
+      "config_name": "2_cnn_max",
+      "mean_auc": 0.5343939393939394,
+      "std_auc": 0.1456561103398647
+    },
+    "max_mean": {
+      "config_name": "2_cnn_max_mean",
+      "mean_auc": 0.48797979797979796,
+      "std_auc": 0.11585396237461268
+    }
+  }
+}

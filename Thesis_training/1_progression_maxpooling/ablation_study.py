@@ -8,7 +8,8 @@ import sys
 import torch
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-
+from scipy.stats import ttest_rel
+import random
 sys.path.append(str(Path(__file__).parent.parent))
 from utilities import (
     CNNFeatureExtractor,
@@ -22,40 +23,85 @@ from model_train import (
     plot_evaluation_metrics,
     evaluate_with_threshold,
     plot_validation_roc_with_thresholds,
-    aggregate_fold_results
-    
+    aggregate_fold_results,
+    train_single_fold
     )
 
-"""'cnn_only': {
-        'use_cnn_features': True,
-        'use_hand_features': False,
-        'use_demographics': False,
-        'description': 'CNN features only (baseline)'
-    },
-    'cnn_demo': {
-        'use_cnn_features': True,
-        'use_hand_features': False,
-        'use_demographics': True,
-        'description': 'CNN + Demographics'
-    },"""
 
-# Feature configurations
+# ============================================================================
+# ABLATION STUDY STRUCTURE - 3 BLOCKS
+# ============================================================================
+
 ABLATION_CONFIGS = {
-
+    # ========== BLOCK 1: CLINICAL BASELINE ==========
+    # Traditional clinical prediction without imaging
     
+    '1_hand_only': {
+        'use_cnn_features': False,
+        'use_hand_features': True,
+        'use_demographics': False,
+        'description': '[BLOCK 1] Hand-crafted features only',
+        'block': 'Clinical Baseline'
+    },
     
-    'cnn_hand': {
+    '1_hand_demo': {
+        'use_cnn_features': False,
+        'use_hand_features': True,
+        'use_demographics': True,
+        'description': '[BLOCK 1] Hand-crafted + Demographics',
+        'block': 'Clinical Baseline'
+    },
+    
+    # ========== BLOCK 2: IMAGING ONLY ==========
+    # Deep learning on small dataset - show instability
+    
+    '2_cnn_mean': {
+        'use_cnn_features': True,
+        'use_hand_features': False,
+        'use_demographics': False,
+        'description': '[BLOCK 2] CNN with mean pooling',
+        'block': 'Imaging Only',
+        'pooling_type': 'mean'
+    },
+    
+    '2_cnn_max': {
+        'use_cnn_features': True,
+        'use_hand_features': False,
+        'use_demographics': False,
+        'description': '[BLOCK 2] CNN with max pooling',
+        'block': 'Imaging Only',
+        'pooling_type': 'max'
+    },
+    
+    '2_cnn_max_mean': {
+        'use_cnn_features': True,
+        'use_hand_features': False,
+        'use_demographics': False,
+        'description': '[BLOCK 2] CNN with max+mean pooling (concatenated)',
+        'block': 'Imaging Only',
+        'pooling_type': 'max_mean'
+    },
+    
+    # ========== BLOCK 3: FULL MODEL ==========
+    # Multimodal fusion - imaging + clinical
+    # Uses pooling_type from BASE_CONFIG (set manually after BLOCK 2 results)
+    
+    '3_cnn_hand': {
         'use_cnn_features': True,
         'use_hand_features': True,
         'use_demographics': False,
-        'description': 'CNN + Hand-crafted features'
+        'description': '[BLOCK 3] CNN + Hand-crafted',
+        'block': 'Full Model'
+        # No pooling_type override - uses BASE_CONFIG['pooling_type']
     },
     
-    'full': {
+    '3_cnn_hand_demo': {
         'use_cnn_features': True,
         'use_hand_features': True,
         'use_demographics': True,
-        'description': 'CNN + Hand-crafted + Demographics (full)'
+        'description': '[BLOCK 3] CNN + Hand-crafted + Demographics (FULL)',
+        'block': 'Full Model'
+        # No pooling_type override - uses BASE_CONFIG['pooling_type']
     },
 }
 
@@ -64,33 +110,33 @@ BASE_CONFIG = {
     # Paths
     "gt_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Label_ground_truth\ground_truth.csv"),
     "ct_scan_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Dataset\extracted_npy_full_dataset"),
-    "patient_features_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\patient_features_all_slices.csv"),
+    "patient_features_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\patient_features_30_60.csv"),
     "kfold_splits_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\kfold_splits_stratified.pkl"),
     "train_csv_path": Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\Dataset\train.csv"),
-    
+    'base_seed': 42,
     # Model parameters
     'backbone': 'resnet50',
     'image_size': (224, 224),
     'pooling_type': 'max',
-    'use_feature_branches': True,
+    'use_feature_branches': False,  # Simplified architecture for small dataset
     'use_ktop': False,
     
     # Training parameters
     'batch_size': 16,
     'learning_rate': 3.86e-05,
-    'weight_decay': 0.0305,
-    'epochs': 100,
-    'early_stopping_patience': 20,
-    'label_smoothing': 0.2,
+    'weight_decay': 0.003, #0.003
+    'epochs': 60,
+    'early_stopping_patience': 15,
+    'label_smoothing': 0,
     'use_scheduler': True,
     'scheduler_patience': 5,
     'scheduler_factor': 0.5,
     'scheduler_min_lr': 1e-6,
     
-    # Model architecture
-    'hidden_dims': [256, 128,64],
-    'dropout': 0.7,
-    'use_batch_norm': True,
+    # Model architecture (simplified: CNN reduction → concat → small classifier)
+    'hidden_dims': [32],  # Not used anymore - architecture is now fixed
+    'dropout': 0.3,
+    'use_batch_norm': False,
     
     'resume_from_checkpoint': True,
     'normalization_type': 'standard',  # 'standard', 'minmax', o 'robust'
@@ -99,20 +145,34 @@ BASE_CONFIG = {
 
 # Hand-crafted features da normalizzare
 HAND_FEATURE_COLS = [
-    'ApproxVol',
-    'Avg_NumTissuePixel',
-    'Avg_Tissue',
-    'Avg_Tissue_thickness',
-    'Avg_TissueByTotal',
-    'Avg_TissueByLung',
-    'Mean',
-    'Skew',
-    'Kurtosis'
+    'ApproxVol_30_60',
+    'Avg_NumTissuePixel_30_60',
+    'Avg_Tissue_30_60',
+    'Avg_Tissue_thickness_30_60',
+    'Avg_TissueByTotal_30_60',
+    'Avg_TissueByLung_30_60',
+    'Mean_30_60',
+    'Skew_30_60',
+    'Kurtosis_30_60'
 ]
 
 # Demographic features
 DEMO_FEATURE_COLS = ['Age', 'Sex', 'SmokingStatus']
 
+def set_seed(seed=42):
+    """Set random seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    print(f"\n{'='*70}")
+    print(f"🔒 RANDOM SEED SET TO: {seed}")
+    print(f"{'='*70}")
 
 def load_and_merge_demographics(train_csv_path: Path, patient_features_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -271,6 +331,21 @@ def preprocess_demographics_improved(
             count = (orig_smoking == val).sum()
             print(f"    {val}: {count}")
     
+    # === REMOVE ORIGINAL DEMOGRAPHIC COLUMNS ===
+    # Keep only the preprocessed versions to avoid duplication
+    cols_to_remove = []
+    if 'Age_normalized' in result_df.columns and 'Age' in result_df.columns:
+        cols_to_remove.append('Age')
+    if 'Sex_encoded' in result_df.columns and 'Sex' in result_df.columns:
+        cols_to_remove.append('Sex')
+    if encoding_info.get('smoking_columns') and 'SmokingStatus' in result_df.columns:
+        cols_to_remove.append('SmokingStatus')
+    
+    if cols_to_remove:
+        result_df.drop(cols_to_remove, axis=1, inplace=True)
+        print(f"\n  Removed original demographic columns: {cols_to_remove}")
+        print(f"  ✓ Using only preprocessed versions")
+    
     return result_df, encoding_info
 
 
@@ -419,8 +494,15 @@ def create_feature_set_for_fold(
     print(f"FEATURE SET: {ablation_config['description']}")
     print("="*70)
     
-    # Start con CNN features
+    # Start con slice-level info (patient_id, slice_idx, label)
     result_df = slice_features_df.copy()
+    
+    # Rimuovi CNN features se non richieste (CRUCIAL per BLOCK 1)
+    if not ablation_config['use_cnn_features']:
+        cnn_cols_to_drop = [c for c in result_df.columns if c.startswith('cnn_feature_')]
+        if cnn_cols_to_drop:
+            result_df.drop(cnn_cols_to_drop, axis=1, inplace=True)
+            print(f"  Removed {len(cnn_cols_to_drop)} CNN features (use_cnn_features=False)")
     
     # Determina quali features aggiungere
     patient_level_cols = ['Patient']
@@ -516,250 +598,6 @@ def create_feature_set_for_fold(
     return result_df, encoding_info
 
 
-def train_single_fold(
-    features_df: pd.DataFrame,
-    fold_data: dict,
-    fold_idx: int,
-    config: dict,
-    results_dir: Path,
-    resume_from_checkpoint: bool = True,
-    hand_feature_cols: list = None,
-    demo_feature_cols: list = None,
-    encoding_info: dict = None
-):
-    """Train model on a single fold with slice-level predictions"""
-    
-    if hand_feature_cols is None:
-        hand_feature_cols = HAND_FEATURE_COLS
-    if demo_feature_cols is None:
-        demo_feature_cols = DEMO_FEATURE_COLS
-    if encoding_info is None:
-        encoding_info = {}
-    
-    # DEBUG: Verify encoding_info content
-    if encoding_info:
-        print(f"\n[DEBUG] encoding_info received: {list(encoding_info.keys())}")
-        if 'smoking_columns' in encoding_info:
-            print(f"[DEBUG] Smoking columns: {encoding_info['smoking_columns']}")
-    else:
-        print("\n[DEBUG] WARNING: encoding_info is empty!")
-    
-    fold_dir = results_dir / f"fold_{fold_idx}"
-    fold_dir.mkdir(parents=True, exist_ok=True)
-    
-    checkpoint_path = fold_dir / "best_model.pth"
-    
-    # Check for existing checkpoint
-    if resume_from_checkpoint and checkpoint_path.exists():
-        print("\n" + "="*70)
-        print(f"CHECKPOINT FOUND FOR FOLD {fold_idx}")
-        print("="*70)
-        
-        checkpoint = torch.load(checkpoint_path, weights_only=False)
-        
-        is_complete = (
-            'test_metrics_default' in checkpoint and 
-            'test_metrics_optimal' in checkpoint and
-            'val_auc' in checkpoint and
-            'optimal_threshold' in checkpoint
-        )
-        
-        if is_complete:
-            print("\n✓ Fold already completed! Loading saved results...")
-            print(f"  Val AUC: {checkpoint.get('val_auc'):.4f}")
-            print(f"  Test AUC (Optimal): {checkpoint['test_metrics_optimal'].get('auc'):.4f}")
-            
-            return {
-                'fold_idx': fold_idx,
-                'val_auc': checkpoint.get('val_auc'),
-                'test_metrics_default': checkpoint.get('test_metrics_default', {}),
-                'test_metrics_optimal': checkpoint.get('test_metrics_optimal', {}),
-                'optimal_threshold': checkpoint.get('optimal_threshold'),
-                'loaded_from_checkpoint': True
-            }
-    
-    print("\n" + "="*70)
-    print(f"TRAINING FOLD {fold_idx}")
-    print("="*70)
-    
-    # Create dataloaders
-    train_ids = fold_data['train']
-    val_ids = fold_data['val']
-    test_ids = fold_data['test']
-    
-    print(f"\nDataset splits:")
-    print(f"  Train: {len(train_ids)} patients")
-    print(f"  Val: {len(val_ids)} patients")
-    print(f"  Test: {len(test_ids)} patients")
-    
-    # Identify available features
-    available_hand_cols = [c for c in hand_feature_cols if c in features_df.columns]
-    
-    # For demographics, DON'T filter by column names since they've been preprocessed
-    # (Age -> Age_normalized, Sex -> Sex_encoded, SmokingStatus -> Smoking_0/1/2)
-    # The dataset will handle mapping original names to preprocessed columns
-    
-    print(f"\nFeature availability:")
-    print(f"  Hand-crafted: {len(available_hand_cols)}/{len(hand_feature_cols)}")
-    print(f"  Demographics: {len(demo_feature_cols)}/{len(demo_feature_cols)}")
-    
-    # Compute class weights
-    class_weights = compute_class_weights(features_df, train_ids)
-    
-    # Create dataloaders
-    # Pass ORIGINAL demographic column names - the dataset handles preprocessing mapping
-    train_loader, val_loader, test_loader = create_dataloaders(
-        features_df,
-        train_ids=train_ids,
-        val_ids=val_ids,
-        test_ids=test_ids,
-        batch_size=config['batch_size'],
-        num_workers=4,
-        hand_feature_cols=available_hand_cols,
-        demo_feature_cols=demo_feature_cols,  # Pass original names, not filtered
-        encoding_info=encoding_info
-    )
-    
-    # Get actual dimensions from first batch
-    sample_batch = next(iter(train_loader))
-    actual_cnn_dim = sample_batch['cnn_features'].shape[2]
-    
-    # Get actual hand-crafted and demographic dimensions
-    actual_hand_dim = sample_batch['hand_features'].shape[1] if sample_batch['hand_features'] is not None else 0
-    actual_demo_dim = sample_batch['demo_features'].shape[1] if sample_batch['demo_features'] is not None else 0
-    actual_patient_dim = actual_hand_dim + actual_demo_dim
-    
-    print(f"\nActual feature dimensions:")
-    print(f"  CNN features: {actual_cnn_dim}")
-    print(f"  Hand-crafted features: {actual_hand_dim}")
-    print(f"  Demographic features: {actual_demo_dim}")
-    print(f"  Total patient-level: {actual_patient_dim}")
-    
-    # Create model
-    print(f"\nInitializing model:")
-    print(f"  Hidden dimensions: {config['hidden_dims']}")
-    print(f"  Dropout: {config['dropout']}")
-    print(f"  Pooling: {config.get('pooling_type', 'max')}")
-    print(f"  Feature branches: {config.get('use_feature_branches', True)}")
-    
-    model = ProgressionPredictionModel(
-        cnn_feature_dim=actual_cnn_dim,
-        hand_feature_dim=actual_hand_dim,  # Use ACTUAL dimensions from batch
-        demo_feature_dim=actual_demo_dim,   # Use ACTUAL dimensions from batch
-        hidden_dims=config['hidden_dims'],
-        dropout=config['dropout'],
-        use_batch_norm=config['use_batch_norm'],
-        pooling_type=config.get('pooling_type', 'max'),  # NEW
-        use_feature_branches=config.get('use_feature_branches', True),  # NEW,
-        use_ktop=config.get('use_ktop', True)  # NEW
-    )
-    
-    # Create trainer
-    trainer = ModelTrainer(
-        model=model,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        learning_rate=config['learning_rate'],
-        weight_decay=config['weight_decay'],
-        class_weights=class_weights,
-        use_scheduler=config['use_scheduler']
-    )
-    
-    # Train
-    print(f"\n{'='*70}")
-    print("TRAINING")
-    print("="*70)
-    
-    best_val_auc = trainer.fit(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        epochs=config['epochs'],
-        early_stopping_patience=config['early_stopping_patience'],
-        verbose=True
-    )
-    
-    trainer.plot_training_history(save_path=str(fold_dir / "training_history.png"))
-    
-    # Validation analysis
-    print(f"\n{'='*70}")
-    print("VALIDATION SET THRESHOLD ANALYSIS")
-    print("="*70)
-    
-    val_results = trainer.evaluate(val_loader)
-    threshold_analysis = plot_validation_roc_with_thresholds(
-        y_true=val_results['labels'],
-        y_pred=val_results['predictions'],
-        save_path=str(fold_dir / "validation_roc_threshold_analysis.png")
-    )
-    
-    optimal_threshold = threshold_analysis['Youden']['threshold']
-    print(f"\nSelected Optimal Threshold: {optimal_threshold:.4f} (Youden's J)")
-    
-    # Test evaluation
-    print(f"\n{'='*70}")
-    print("TEST SET EVALUATION")
-    print("="*70)
-    
-    test_results = trainer.evaluate(test_loader)
-    
-    test_metrics_default = evaluate_with_threshold(
-        y_true=test_results['labels'],
-        y_pred=test_results['predictions'],
-        threshold=0.5
-    )
-    
-    test_metrics_optimal = evaluate_with_threshold(
-        y_true=test_results['labels'],
-        y_pred=test_results['predictions'],
-        threshold=optimal_threshold
-    )
-    
-    # Plot evaluations
-    plot_evaluation_metrics(
-        y_true=test_results['labels'],
-        y_pred=test_results['predictions'],
-        threshold=0.5,
-        save_path=str(fold_dir / "test_evaluation_default_threshold.png")
-    )
-    
-    plot_evaluation_metrics(
-        y_true=test_results['labels'],
-        y_pred=test_results['predictions'],
-        threshold=optimal_threshold,
-        save_path=str(fold_dir / "test_evaluation_optimal_threshold.png")
-    )
-    
-    # Save checkpoint
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'config': config,
-        'fold_idx': fold_idx,
-        'val_auc': best_val_auc,
-        'optimal_threshold': optimal_threshold,
-        'threshold_analysis': threshold_analysis,
-        'test_metrics_default': test_metrics_default,
-        'test_metrics_optimal': test_metrics_optimal,
-    }, checkpoint_path)
-    
-    # Save predictions
-    predictions_df = pd.DataFrame({
-        'patient_id': test_ids,
-        'true_label': test_results['labels'],
-        'predicted_prob': test_results['predictions'],
-        'predicted_label_default': (test_results['predictions'] >= 0.5).astype(int),
-        'predicted_label_optimal': (test_results['predictions'] >= optimal_threshold).astype(int)
-    })
-    predictions_df.to_csv(fold_dir / "test_predictions.csv", index=False)
-    
-    print(f"\n✓ Fold {fold_idx} complete! Results saved to: {fold_dir}")
-    
-    return {
-        'fold_idx': fold_idx,
-        'val_auc': best_val_auc,
-        'test_metrics_default': test_metrics_default,
-        'test_metrics_optimal': test_metrics_optimal,
-        'optimal_threshold': optimal_threshold,
-        'loaded_from_checkpoint': False
-    }
 def run_ablation_study(
     slice_features_df: pd.DataFrame,
     patient_features_df: pd.DataFrame,
@@ -767,75 +605,178 @@ def run_ablation_study(
     base_config: dict,
     results_base_dir: Path
 ):
-    """Run ablation study with correct architecture and normalization"""
+    """Run ablation study with 3 blocks: clinical baseline + imaging pooling + multimodal"""
     
     print("\n" + "="*70)
-    print("ABLATION STUDY - SLICE-LEVEL PREDICTIONS + PROPER NORMALIZATION")
+    print("ABLATION STUDY - 3 BLOCKS")
     print("="*70)
-    print(f"Configurations: {len(ABLATION_CONFIGS)}")
+    print(f"Total configurations: {len(ABLATION_CONFIGS)}")
     
     all_ablation_results = {}
     
-    for config_name, ablation_config in ABLATION_CONFIGS.items():
-        print("\n" + "="*80)
-        print(f"ABLATION EXPERIMENT: {config_name.upper()}")
-        print("="*80)
-        print(f"Description: {ablation_config['description']}")
-        
-        ablation_results_dir = results_base_dir / f"ablation_{config_name}"
-        ablation_results_dir.mkdir(parents=True, exist_ok=True)
-        
-        fold_results = []
-        fold_keys = sorted(kfold_splits.keys())
-        
-        for fold_idx in fold_keys:
-            #fold_idx = int(fold_key.split('_')[1])
-            fold_data = kfold_splits[fold_idx]
-            
-            # CRUCIAL: Normalize per fold using only its training set
-            features_df, encoding_info = create_feature_set_for_fold(
-                slice_features_df=slice_features_df,
-                patient_features_df=patient_features_df,
-                fold_data=fold_data,
-                ablation_config=ablation_config,
-                normalization_type=base_config['normalization_type']
-            )
-            
-            # Configure
-            config = base_config.copy()
-            config['results_save_dir'] = ablation_results_dir
-            
-            # Train
-            result = train_single_fold(
-                features_df=features_df,
-                fold_data=fold_data,
-                fold_idx=fold_idx,
-                config=config,
-                results_dir=ablation_results_dir,
-                resume_from_checkpoint=config['resume_from_checkpoint'],
-                encoding_info=encoding_info  # Pass encoding info with smoking_columns
-            )
-            
-            fold_results.append(result)
-        
-        summary_df, detailed_df = aggregate_fold_results(
-            fold_results=fold_results,
-            save_path=ablation_results_dir
+    # Separate experiments by block
+    block_1_configs = {k: v for k, v in ABLATION_CONFIGS.items() if k.startswith('1_')}
+    block_2_configs = {k: v for k, v in ABLATION_CONFIGS.items() if k.startswith('2_')}
+    block_3_configs = {k: v for k, v in ABLATION_CONFIGS.items() if k.startswith('3_')}
+    
+    print(f"\n  BLOCK 1 (Clinical):  {len(block_1_configs)} experiments")
+    print(f"  BLOCK 2 (Imaging):   {len(block_2_configs)} experiments")
+    print(f"  BLOCK 3 (Full):      {len(block_3_configs)} experiments")
+    print(f"\n  BLOCK 3 will use pooling type: '{base_config['pooling_type']}'")
+    print(f"  (Update BASE_CONFIG['pooling_type'] after BLOCK 2 if needed)")
+    """
+    # ========== BLOCK 1: Clinical Baseline ==========
+    print("\n" + "="*80)
+    print("EXECUTING BLOCK 1 - CLINICAL BASELINE")
+    print("="*80)
+    
+    for config_name, ablation_config in block_1_configs.items():
+        all_ablation_results[config_name] = _run_single_experiment(
+            config_name, ablation_config, 
+            slice_features_df, patient_features_df, kfold_splits, base_config, results_base_dir
         )
+    
+    # ========== BLOCK 2: Imaging Only (Test Pooling Strategies) ==========
+    print("\n" + "="*80)
+    print("EXECUTING BLOCK 2 - IMAGING ONLY (POOLING COMPARISON)")
+    print("="*80)
+    
+    for config_name, ablation_config in block_2_configs.items():
+        all_ablation_results[config_name] = _run_single_experiment(
+            config_name, ablation_config,
+            slice_features_df, patient_features_df, kfold_splits, base_config, results_base_dir
+        )
+    
+    # ========== Analyze BLOCK 2 Results ==========
+    print("\n" + "="*80)
+    print("BLOCK 2 POOLING COMPARISON RESULTS")
+    print("="*80)
+    
+    block_2_results = {}
+    for config_name in block_2_configs.keys():
+        fold_results = all_ablation_results[config_name]['fold_results']
+        mean_auc = np.mean([fold['test_metrics_optimal']['auc'] for fold in fold_results])
+        std_auc = np.std([fold['test_metrics_optimal']['auc'] for fold in fold_results])
+        pooling_type = ABLATION_CONFIGS[config_name]['pooling_type']
         
-        all_ablation_results[config_name] = {
-            'config': ablation_config,
-            'summary': summary_df,
-            'detailed': detailed_df,
-            'fold_results': fold_results
+        block_2_results[pooling_type] = {
+            'config_name': config_name,
+            'mean_auc': mean_auc,
+            'std_auc': std_auc
         }
-        
-        print(f"\n✓ '{config_name}' complete!")
+        print(f"  {pooling_type:12s}: AUC = {mean_auc:.4f} ± {std_auc:.4f}")
+    
+    # Identify best pooling for user's reference
+    best_pooling = max(block_2_results.items(), key=lambda x: x[1]['mean_auc'])[0]
+    best_auc = block_2_results[best_pooling]['mean_auc']
+    
+    print(f"\n→ Best performing pooling: {best_pooling} (AUC = {best_auc:.4f})")
+    print(f"  Recommended for BLOCK 3 multimodal experiments")
+    
+    # Save pooling comparison for reference
+    pooling_info = {
+        'best_pooling': best_pooling,
+        'best_auc': best_auc,
+        'block_2_results': block_2_results
+    }
+    import json
+    with open(results_base_dir / "pooling_comparison.json", 'w') as f:
+        json.dump(pooling_info, f, indent=2, default=str)
+    
+    print(f"\n✓ Pooling comparison saved to: {results_base_dir / 'pooling_comparison.json'}")
+    """
+    # ========== BLOCK 3: Full Model (Multimodal) ==========
+    print("\n" + "="*80)
+    print(f"EXECUTING BLOCK 3 - FULL MODEL (using '{base_config['pooling_type']}' pooling)")
+    print("="*80)
+    
+    for config_name, ablation_config in block_3_configs.items():
+        all_ablation_results[config_name] = _run_single_experiment(
+            config_name, ablation_config,
+            slice_features_df, patient_features_df, kfold_splits, base_config, results_base_dir
+        )
     
     # Create comparison
     create_ablation_comparison(all_ablation_results, results_base_dir)
     
+    # Statistical testing (fold-by-fold paired t-tests)
+    perform_statistical_testing(all_ablation_results, results_base_dir)
+    
     return all_ablation_results
+
+
+def _run_single_experiment(
+    config_name: str,
+    ablation_config: dict,
+    slice_features_df: pd.DataFrame,
+    patient_features_df: pd.DataFrame,
+    kfold_splits: dict,
+    base_config: dict,
+    results_base_dir: Path
+) -> dict:
+    """Run a single ablation experiment"""
+    print("\n" + "="*80)
+    print(f"EXPERIMENT: {config_name.upper()}")
+    print("="*80)
+    print(f"Description: {ablation_config['description']}")
+    
+    ablation_results_dir = results_base_dir / f"ablation_{config_name}"
+    ablation_results_dir.mkdir(parents=True, exist_ok=True)
+    
+    fold_results = []
+    fold_keys = sorted(kfold_splits.keys())
+    
+    for fold_idx in fold_keys:
+        fold_seed = base_config['base_seed'] + fold_idx * 100
+        set_seed(fold_seed)
+        
+        print(f"\nFOLD {fold_idx} - SEED: {fold_seed}")
+        fold_data = kfold_splits[fold_idx]
+        
+        # CRUCIAL: Normalize per fold using only its training set
+        features_df, encoding_info = create_feature_set_for_fold(
+            slice_features_df=slice_features_df,
+            patient_features_df=patient_features_df,
+            fold_data=fold_data,
+            ablation_config=ablation_config,
+            normalization_type=base_config['normalization_type']
+        )
+        
+        # Configure
+        config = base_config.copy()
+        config['results_save_dir'] = ablation_results_dir
+        
+        # Override pooling_type if specified in ablation_config
+        if 'pooling_type' in ablation_config:
+            config['pooling_type'] = ablation_config['pooling_type']
+            print(f"  Using pooling: {ablation_config['pooling_type']}")
+        
+        # Train
+        result = train_single_fold(
+            features_df=features_df,
+            fold_data=fold_data,
+            fold_idx=fold_idx,
+            config=config,
+            results_dir=ablation_results_dir,
+            resume_from_checkpoint=config['resume_from_checkpoint'],
+            encoding_info=encoding_info
+        )
+        
+        fold_results.append(result)
+    
+    summary_df, detailed_df = aggregate_fold_results(
+        fold_results=fold_results,
+        save_path=ablation_results_dir
+    )
+    
+    print(f"\n✓ '{config_name}' complete!")
+    
+    return {
+        'config': ablation_config,
+        'summary': summary_df,
+        'detailed': detailed_df,
+        'fold_results': fold_results
+    }
 
 
 def create_ablation_comparison(all_results: dict, results_dir: Path):
@@ -911,8 +852,89 @@ def create_ablation_comparison(all_results: dict, results_dir: Path):
     
     print(f"\nVisualization saved!")
 
+def perform_statistical_testing(all_results: dict, results_dir: Path):
+    """
+    Perform fold-by-fold paired t-tests between experiments
+    Tests hypothesis: Is experiment A significantly better than experiment B?
+    """
+    print("\n" + "="*70)
+    print("STATISTICAL TESTING - PAIRED T-TESTS (FOLD-BY-FOLD)")
+    print("="*70)
+    
+    # Extract fold-by-fold test AUCs for each experiment
+    experiment_names = list(all_results.keys())
+    experiment_aucs = {}
+    
+    for exp_name in experiment_names:
+        fold_results = all_results[exp_name]['fold_results']
+        # Get test AUC with optimal threshold for each fold
+        aucs = [fold['test_metrics_optimal']['auc'] for fold in fold_results]
+        experiment_aucs[exp_name] = np.array(aucs)
+        print(f"  {exp_name}: {len(aucs)} folds, AUC = {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
+    
+    # Perform pairwise comparisons
+    print("\n" + "="*70)
+    print("PAIRWISE COMPARISONS (Paired T-Test)")
+    print("="*70)
+    
+    comparisons = []
+    n_experiments = len(experiment_names)
+    
+    for i in range(n_experiments):
+        for j in range(i + 1, n_experiments):
+            exp1 = experiment_names[i]
+            exp2 = experiment_names[j]
+            
+            aucs1 = experiment_aucs[exp1]
+            aucs2 = experiment_aucs[exp2]
+            
+            # Paired t-test (requires same number of folds)
+            if len(aucs1) != len(aucs2):
+                print(f"\n⚠ {exp1} vs {exp2}: Different number of folds, skipping")
+                continue
+            
+            t_stat, p_value = ttest_rel(aucs1, aucs2)
+            mean_diff = np.mean(aucs1 - aucs2)
+            
+            # Determine significance
+            if p_value < 0.001:
+                sig = '***'
+            elif p_value < 0.01:
+                sig = '**'
+            elif p_value < 0.05:
+                sig = '*'
+            else:
+                sig = 'ns'
+            
+            print(f"\n{exp1} vs {exp2}:")
+            print(f"  Mean AUC difference: {mean_diff:.4f}")
+            print(f"  t-statistic: {t_stat:.4f}")
+            print(f"  p-value: {p_value:.4f} {sig}")
+            
+            comparisons.append({
+                'Experiment_1': exp1,
+                'Experiment_2': exp2,
+                'Mean_AUC_1': np.mean(aucs1),
+                'Mean_AUC_2': np.mean(aucs2),
+                'Mean_Diff': mean_diff,
+                't_statistic': t_stat,
+                'p_value': p_value,
+                'Significance': sig
+            })
+    
+    # Save to CSV
+    comparison_df = pd.DataFrame(comparisons)
+    comparison_df.to_csv(results_dir / "statistical_tests.csv", index=False)
+    
+    print("\n" + "="*70)
+    print("STATISTICAL TESTING COMPLETE")
+    print("="*70)
+    print(f"Results saved to: {results_dir / 'statistical_tests.csv'}")
+    print("\nSignificance levels: *** p<0.001, ** p<0.01, * p<0.05, ns p≥0.05")
+
 def main():
-    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression_maxpooling\full_slices_training_3_max")
+    set_seed(BASE_CONFIG['base_seed'])
+    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression_maxpooling\third_block_analysis")
     results_base_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data

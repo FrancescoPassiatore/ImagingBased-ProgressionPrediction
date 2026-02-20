@@ -1,0 +1,23 @@
+# Requirements for Expert Ensemble System
+
+# Core ML frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+scikit-learn>=1.3.0
+lightgbm>=4.0.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+scipy>=1.10.0
+tqdm>=4.65.0
+
+# Optional (for advanced features)
+# tensorboard>=2.13.0
+# wandb>=0.15.0

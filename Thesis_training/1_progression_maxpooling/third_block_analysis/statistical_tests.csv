@@ -1,0 +1,2 @@
+Experiment_1,Experiment_2,Mean_AUC_1,Mean_AUC_2,Mean_Diff,t_statistic,p_value,Significance
+3_cnn_hand,3_cnn_hand_demo,0.5352525252525252,0.45671717171717174,0.0785353535353535,0.6088036463426854,0.5755342989008247,ns

@@ -45,7 +45,7 @@ class ProgressionPredictionModel(nn.Module):
         cnn_feature_dim: int = 2048,
         hand_feature_dim: int = 0,
         demo_feature_dim: int = 0,
-        hidden_dims: List[int] = [512, 256, 128],
+        hidden_dims: List[int] = [128, 64, 32],
         dropout: float = 0.5,
         use_batch_norm: bool = True,
         pooling_type: str = 'max',  # 'max', 'mean', or 'attention'
@@ -69,72 +69,38 @@ class ProgressionPredictionModel(nn.Module):
         print(f"  Hand-crafted features: {hand_feature_dim}")
         print(f"  Demographic features: {demo_feature_dim}")
         print(f"  Pooling strategy: {pooling_type}")
-        print(f"  Feature branches: {use_feature_branches}")
+        print(f"  Architecture: Simplified (no branches)")
+        print(f"  K-Top: {use_ktop}")
         
-        # Slice-level importance scorer (for K-Top)
-        if self.use_ktop:
-            self.slice_scorer = nn.Sequential(
-                nn.Linear(cnn_feature_dim, 128),
+        # === CNN REDUCTION LAYER (only if CNN features present) ===
+        if cnn_feature_dim > 0:
+            # Reduce CNN features to 32 for small dataset
+            # Note: for max_mean pooling, input will be 2*cnn_feature_dim (concatenated)
+            reduction_input_dim = cnn_feature_dim * 2 if pooling_type == 'max_mean' else cnn_feature_dim
+            self.cnn_reduction = nn.Sequential(
+                nn.Linear(reduction_input_dim, 32),
                 nn.ReLU(),
-                nn.Linear(128, 1)
+                nn.Dropout(0.3)
             )
-
-            
-        
-        # === SEPARATE FEATURE PROCESSING BRANCHES (like FVC model) ===
-        
-        if use_feature_branches:
-            # 1. CNN features branch
-            self.cnn_branch = nn.Sequential(
-                nn.Linear(cnn_feature_dim, 512),
-                nn.BatchNorm1d(512) if use_batch_norm else nn.Identity(),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            )
-            cnn_output_dim = 512
-            
-            # 2. Patient features branch (hand-crafted + demographics)
-            patient_feature_dim = hand_feature_dim + demo_feature_dim
-            if patient_feature_dim > 0:
-                self.patient_branch = nn.Sequential(
-                    nn.Linear(patient_feature_dim, 64),
-                    nn.ReLU(),
-                    nn.Dropout(dropout * 0.5)
-                )
-                patient_output_dim = 64
-            else:
-                self.patient_branch = None
-                patient_output_dim = 0
-            
-            fusion_input_dim = cnn_output_dim + patient_output_dim
-            
+            cnn_reduced_dim = 32
+            print(f"  CNN reduction: {reduction_input_dim} → 32")
         else:
-            # Simple concatenation (no branches)
-            self.cnn_branch = None
-            self.patient_branch = None
-            fusion_input_dim = cnn_feature_dim + hand_feature_dim + demo_feature_dim
+            self.cnn_reduction = None
+            cnn_reduced_dim = 0
+            print(f"  CNN reduction: SKIPPED (no CNN features)")
+        
+        # Fusion input: reduced CNN (32 or 0) + hand-crafted + demographics
+        fusion_input_dim = cnn_reduced_dim + hand_feature_dim + demo_feature_dim
         
         print(f"  Fusion layer input: {fusion_input_dim}")
         
-        # === CLASSIFICATION HEAD ===
-        layers = []
-        input_dim = fusion_input_dim
-        
-        for i, hidden_dim in enumerate(hidden_dims):
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            
-            layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout if i == 0 else dropout * 0.8))
-            #layers.append(nn.Dropout(0.25 if i == 0 else 0.2))
-            input_dim = hidden_dim
-        
-        # Final classification layer (binary)
-        layers.append(nn.Linear(input_dim, 1))
-        
-        self.classifier = nn.Sequential(*layers)
+        # === CLASSIFICATION HEAD (SMALL) ===
+        self.classifier = nn.Sequential(
+            nn.Linear(fusion_input_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(32, 1)
+        )
     
     def forward(
         self, 
@@ -158,71 +124,66 @@ class ProgressionPredictionModel(nn.Module):
         if batch_size == 1 and is_training:
             self.eval()
 
-        # === K-TOP SLICE SELECTION ===
-        if self.use_ktop:
-            B, S, F = slice_features.shape
-
-            slice_scores = self.slice_scorer(slice_features).squeeze(-1)  # (B, S)
-
-            mask = torch.arange(S, device=slice_features.device)[None, :] < lengths[:, None]
-            slice_scores = slice_scores.masked_fill(~mask, -1e9)
-
-            k = min(self.k_top, S)
-            _, topk_idx = torch.topk(slice_scores, k=k, dim=1)  # (B, K)
-
-            # ✅ SAVE CORRECT INDICES (B, K)
-            self.last_topk_indices = topk_idx.detach().cpu()
-
-            # Now expand ONLY for gather
-            topk_idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, F)
-            slice_features = torch.gather(slice_features, dim=1, index=topk_idx_exp)
-
-            lengths = torch.full_like(lengths, k)
-            max_slices = k
         
-        # === 1. POOL CNN FEATURES (SAME AS FVC MODEL) ===
-        if self.pooling_type == 'max':
-            mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
-            mask = mask.unsqueeze(-1)
-            masked_features = slice_features.clone()
-            masked_features[~mask.expand_as(slice_features)] = -1e9
-            pooled_cnn, _ = masked_features.max(dim=1)  # (batch_size, cnn_dim)
+        # === 1. POOL AND REDUCE CNN FEATURES (only if CNN features present) ===
+        if self.cnn_feature_dim > 0:
+            if self.pooling_type == 'max':
+                mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
+                mask = mask.unsqueeze(-1)
+                masked_features = slice_features.clone()
+                masked_features[~mask.expand_as(slice_features)] = -1e9
+                pooled_cnn, _ = masked_features.max(dim=1)  # (batch_size, cnn_dim)
+                
+            elif self.pooling_type == 'mean':
+                mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
+                mask = mask.unsqueeze(-1).float()
+                sum_features = (slice_features * mask).sum(dim=1)
+                pooled_cnn = sum_features / lengths.unsqueeze(-1).float()
+                
+            elif self.pooling_type == 'attention':
+                attn_scores = self.attention(slice_features)
+                mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
+                mask = mask.unsqueeze(-1)
+                attn_scores = attn_scores.masked_fill(~mask, -1e9)
+                attn_weights = torch.softmax(attn_scores, dim=1)
+                pooled_cnn = (slice_features * attn_weights).sum(dim=1)
+                
+            elif self.pooling_type == 'max_mean':
+                # Concatenate max and mean pooling
+                mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
+                mask = mask.unsqueeze(-1)
+                
+                # Max pooling
+                masked_features = slice_features.clone()
+                masked_features[~mask.expand_as(slice_features)] = -1e9
+                pooled_max, _ = masked_features.max(dim=1)
+                
+                # Mean pooling
+                mask_float = mask.float()
+                sum_features = (slice_features * mask_float).sum(dim=1)
+                pooled_mean = sum_features / lengths.unsqueeze(-1).float()
+                
+                # Concatenate: [max, mean]
+                pooled_cnn = torch.cat([pooled_max, pooled_mean], dim=-1)  # (batch_size, 2*cnn_dim)
             
-        elif self.pooling_type == 'mean':
-            mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
-            mask = mask.unsqueeze(-1).float()
-            sum_features = (slice_features * mask).sum(dim=1)
-            pooled_cnn = sum_features / lengths.unsqueeze(-1).float()
-            
-        elif self.pooling_type == 'attention':
-            attn_scores = self.attention(slice_features)
-            mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
-            mask = mask.unsqueeze(-1)
-            attn_scores = attn_scores.masked_fill(~mask, -1e9)
-            attn_weights = torch.softmax(attn_scores, dim=1)
-            pooled_cnn = (slice_features * attn_weights).sum(dim=1)
-        
-        # === 2. PROCESS THROUGH BRANCHES ===
-        
-        if self.use_feature_branches:
-            # CNN branch
-            if self.cnn_branch is not None:
-                cnn_features = self.cnn_branch(pooled_cnn)  # (batch, 512)
-            else:
-                cnn_features = pooled_cnn
-            
-            # Patient features branch
-            if self.patient_branch is not None and patient_features is not None and patient_features.shape[1] > 0:
-                patient_feat = self.patient_branch(patient_features)  # (batch, 64)
-                combined = torch.cat([cnn_features, patient_feat], dim=-1)
-            else:
-                combined = cnn_features
+            # Reduce CNN features
+            cnn_reduced = self.cnn_reduction(pooled_cnn)  # (batch_size, 32)
         else:
-            # Simple concatenation
+            cnn_reduced = None
+        
+        # === 2. CONCATENATE ALL FEATURES ===
+        if cnn_reduced is not None:
+            # Has CNN features
             if patient_features is not None and patient_features.shape[1] > 0:
-                combined = torch.cat([pooled_cnn, patient_features], dim=-1)
+                combined = torch.cat([cnn_reduced, patient_features], dim=-1)
             else:
-                combined = pooled_cnn
+                combined = cnn_reduced
+        else:
+            # No CNN features, only patient-level features
+            if patient_features is not None and patient_features.shape[1] > 0:
+                combined = patient_features
+            else:
+                raise ValueError("Model has no features: both CNN and patient features are empty!")
         
         # === 3. CLASSIFICATION ===
         logits = self.classifier(combined)  # (batch_size, 1)
@@ -332,9 +293,11 @@ class ModelTrainer:
         weight_decay: float = 1e-4,
         class_weights: Tuple[float, float] = None,
         use_scheduler: bool = True,
+        label_smoothing: float = 0.0
     ):
         self.model = model.to(device)
         self.device = device
+        self.label_smoothing = label_smoothing
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=learning_rate,
@@ -397,11 +360,12 @@ class ModelTrainer:
             lengths = batch['lengths'].to(self.device)  # (B,)
             labels = batch['labels'].to(self.device).float()  # (B,)
             
-            # Apply label smoothing
-            labels_smooth = self._apply_label_smoothing(labels)
+            # Apply label smoothing only if configured
+            if self.label_smoothing > 0:
+                labels = self._apply_label_smoothing(labels, self.label_smoothing)
 
             logits = self.model(cnn_features, lengths, patient_features).squeeze(-1)  # (B,)
-            loss = self.criterion(logits, labels_smooth)
+            loss = self.criterion(logits, labels)
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -712,18 +676,21 @@ def train_single_fold(features_df: pd.DataFrame,
                       config: dict,
                       results_dir: Path,
                       resume_from_checkpoint: bool = True,
-                      hand_feature_cols : list = None,
-                      demo_feature_cols : list =None):
+                      hand_feature_cols: list = None,
+                      demo_feature_cols: list = None,
+                      encoding_info: dict = None):
     """
-    Train model on a single fold
+    Train model on a single fold with preprocessed demographics
     """
-
 
     if hand_feature_cols is None:
         hand_feature_cols = HAND_FEATURE_COLS
 
     if demo_feature_cols is None:
         demo_feature_cols = DEMO_FEATURE_COLS
+    
+    if encoding_info is None:
+        encoding_info = {}
 
     fold_dir = results_dir / f"fold_{fold_idx}"
     fold_dir.mkdir(parents=True, exist_ok=True)
@@ -786,23 +753,36 @@ def train_single_fold(features_df: pd.DataFrame,
     print(f"  Val: {len(val_ids)} patients")
     print(f"  Test: {len(test_ids)} patients")
 
-    
-    # CRUCIALE: Identifica quali feature columns sono effettivamente presenti nel DataFrame
+    # Identify available features
     available_hand_cols = [c for c in hand_feature_cols if c in features_df.columns]
-    available_demo_cols = [c for c in demo_feature_cols if c in features_df.columns]
     
-    print(f"\nFeature availability check:")
-    print(f"  Hand-crafted features: {len(available_hand_cols)}/{len(hand_feature_cols)} available")
-    if available_hand_cols:
-        print(f"    Available: {available_hand_cols}")
-    print(f"  Demographic features: {len(available_demo_cols)}/{len(demo_feature_cols)} available")
-    if available_demo_cols:
-        print(f"    Available: {available_demo_cols}")
-
+    # For demographics, DON'T filter by column names since they've been preprocessed
+    # (Age -> Age_normalized, Sex -> Sex_encoded, SmokingStatus -> Smoking_0/1/2)
+    # The dataset will handle mapping original names to preprocessed columns
+    
+    print(f"\nFeature availability:")
+    print(f"  Hand-crafted: {len(available_hand_cols)}/{len(hand_feature_cols)}")
+    print(f"  Demographics: {len(demo_feature_cols)}/{len(demo_feature_cols)}")
+    
+    # Verify demographics preprocessing
+    if demo_feature_cols:
+        print(f"\n  Demographics preprocessing verification:")
+        if 'Age' in demo_feature_cols:
+            has_age_norm = 'Age_normalized' in features_df.columns
+            print(f"    Age → Age_normalized: {'✓' if has_age_norm else '✗ MISSING'}")
+        if 'Sex' in demo_feature_cols:
+            has_sex_enc = 'Sex_encoded' in features_df.columns
+            print(f"    Sex → Sex_encoded: {'✓' if has_sex_enc else '✗ MISSING'}")
+        if 'SmokingStatus' in demo_feature_cols:
+            smoking_cols = encoding_info.get('smoking_columns', [])
+            has_smoking = all(col in features_df.columns for col in smoking_cols)
+            print(f"    SmokingStatus → {smoking_cols}: {'✓' if has_smoking else '✗ MISSING'}")
+    
     # Compute class weights
     class_weights = compute_class_weights(features_df, train_ids)
     
     # Create dataloaders
+    # Pass ORIGINAL demographic column names - the dataset handles preprocessing mapping
     train_loader, val_loader, test_loader = create_dataloaders(
         features_df,
         train_ids=train_ids,
@@ -811,44 +791,48 @@ def train_single_fold(features_df: pd.DataFrame,
         batch_size=config['batch_size'],
         num_workers=4,
         hand_feature_cols=available_hand_cols,
-        demo_feature_cols=available_demo_cols
+        demo_feature_cols=demo_feature_cols,  # Pass original names, not filtered
+        encoding_info=encoding_info
     )
 
-    #Calculate actual feature dimensions from first batch
-    # Questo ci permette di verificare le dimensioni reali
+    # Get actual dimensions from first batch
     sample_batch = next(iter(train_loader))
     actual_cnn_dim = sample_batch['cnn_features'].shape[2]
     
-    if sample_batch['patient_features'] is not None:
-        actual_patient_dim = sample_batch['patient_features'].shape[1]
-    else:
-        actual_patient_dim = 0
+    # Get actual hand-crafted and demographic dimensions
+    actual_hand_dim = sample_batch['hand_features'].shape[1] if sample_batch['hand_features'] is not None else 0
+    actual_demo_dim = sample_batch['demo_features'].shape[1] if sample_batch['demo_features'] is not None else 0
+    actual_patient_dim = actual_hand_dim + actual_demo_dim
     
-    actual_total_dim = actual_cnn_dim + actual_patient_dim
-
-    print(f"\nActual feature dimensions from data:")
+    print(f"\nActual feature dimensions:")
     print(f"  CNN features: {actual_cnn_dim}")
-    print(f"  Patient-level features: {actual_patient_dim}")
-    print(f"  Total: {actual_total_dim}")
+    print(f"  Hand-crafted features: {actual_hand_dim}")
+    print(f"  Demographic features: {actual_demo_dim}")
+    print(f"  Total patient-level: {actual_patient_dim}")
     
     # Create model
     print(f"\nInitializing model:")
-    print(f"  Hidden dimensions: {config['hidden_dims']}")
+    print(f"  Hidden dimensions: {config['hidden_dims']} (not used - fixed architecture)")
     print(f"  Dropout: {config['dropout']}")
-    print(f"  Pooling type: {config.get('pooling_type', 'max')}")
-    print(f"  Feature branches: {config.get('use_feature_branches', True)}")
+    print(f"  Pooling: {config.get('pooling_type', 'max')}")
+    print(f"  Architecture: Simplified (CNN reduction → concat → classifier)")
+    print(f"  Label smoothing: {config.get('label_smoothing', 0.0)}")
     
     model = ProgressionPredictionModel(
         cnn_feature_dim=actual_cnn_dim,
-        hand_feature_dim=len(available_hand_cols),
-        demo_feature_dim=len(available_demo_cols),
+        hand_feature_dim=actual_hand_dim,  # Use ACTUAL dimensions from batch
+        demo_feature_dim=actual_demo_dim,   # Use ACTUAL dimensions from batch
         hidden_dims=config['hidden_dims'],
         dropout=config['dropout'],
         use_batch_norm=config['use_batch_norm'],
-        pooling_type=config.get('pooling_type', 'max'),
-        use_feature_branches=config.get('use_feature_branches', True),
-        use_ktop=config.get('use_ktop', True)
+        pooling_type=config.get('pooling_type', 'max'),  # NEW
+        use_feature_branches=config.get('use_feature_branches', True),  # NEW,
+        use_ktop=config.get('use_ktop', True)  # NEW
     )
+    
+    # Log trainable parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Trainable parameters: {total_params:,}")
     
     # Create trainer
     trainer = ModelTrainer(
@@ -857,7 +841,8 @@ def train_single_fold(features_df: pd.DataFrame,
         learning_rate=config['learning_rate'],
         weight_decay=config['weight_decay'],
         class_weights=class_weights,
-        use_scheduler=config['use_scheduler']
+        use_scheduler=config['use_scheduler'],
+        label_smoothing=config.get('label_smoothing', 0.0)
     )
     
     # Train
