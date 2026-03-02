@@ -68,6 +68,7 @@ class ProgressionPredictionModel(nn.Module):
                 nn.ReLU(),
                 nn.Dropout(dropout),
             )
+            ctfm_reduced_dim = 64
             print(f"  CT-FM reduction: {ctfm_feature_dim} -> 64")
         else:
             self.ctf_reduction = None
@@ -102,7 +103,7 @@ class ProgressionPredictionModel(nn.Module):
         """
         # 1. Reduce CT-FM embeddings
         if self.ctfm_feature_dim > 0:
-            ctfm_reduced = self.ctfm_reduction(volume_features)  # (B, 64)
+            ctfm_reduced = self.ctf_reduction(volume_features)  # (B, 64)
         else:
             ctfm_reduced = None
 
@@ -204,6 +205,8 @@ class ModelTrainer:
             patient_features = hand_features.to(self.device)
         elif demo_features is not None:
             patient_features = demo_features.to(self.device)
+        else:
+            patient_features = None  # No patient-level features available
         
         return patient_features
 
@@ -217,8 +220,12 @@ class ModelTrainer:
         
         for i, batch in enumerate(dataloader):
 
-            #CT-FM: volume-features (B,512) - no lengths needed
-            volume_features = batch['volume_features'].to(self.device)  # (B, 512)
+            # CT-FM: volume-features come as (B, max_slices, feature_dim)
+            # For patient-level CT-FM embeddings, max_slices=1, so squeeze to (B, feature_dim)
+            volume_features = batch['volume_features'].to(self.device)  # (B, 1, 512)
+            if volume_features.shape[1] == 1:
+                volume_features = volume_features.squeeze(1)  # (B, 512)
+            
             patient_features = self._get_patient_features(batch)  # (B, hand+demo) or None            
             
             if i==0:
@@ -263,13 +270,19 @@ class ModelTrainer:
         all_losses = []
         all_preds = []
         all_labels = []
+        all_patient_ids = []
         
         with torch.no_grad():
             for batch in dataloader:
                 volume_features = batch['volume_features'].to(self.device)
+                # For patient-level CT-FM embeddings, squeeze slice dimension if needed
+                if volume_features.shape[1] == 1:
+                    volume_features = volume_features.squeeze(1)  # (B, 1, 512) -> (B, 512)
+                
                 patient_features = self._get_patient_features(batch)  # (B, hand+demo) or None
                 
                 labels = batch['labels'].to(self.device).float()
+                patient_ids = batch['patient_ids']  # Collect patient IDs
             
                 # Forward pass
                 logits = self.model(volume_features, patient_features).squeeze(-1)
@@ -280,6 +293,7 @@ class ModelTrainer:
                 probs = torch.sigmoid(logits).cpu().numpy()
                 all_preds.extend(probs)
                 all_labels.extend(labels.cpu().numpy())
+                all_patient_ids.extend(patient_ids)
         
         # Compute metrics
         all_preds = np.array(all_preds)
@@ -291,7 +305,8 @@ class ModelTrainer:
             'acc': accuracy_score(all_labels, all_preds > 0.5),
             'f1': f1_score(all_labels, all_preds > 0.5, zero_division=0),
             'predictions': all_preds,
-            'labels': all_labels
+            'labels': all_labels,
+            'patient_ids': all_patient_ids
         }
         
         return metrics
@@ -653,7 +668,8 @@ def train_single_fold(features_df: pd.DataFrame,
 
     # Get actual dimensions from first batch
     sample_batch = next(iter(train_loader))
-    actual_ctfm_dim = sample_batch['volume_features'].shape[1]   # (B, 512)
+    # volume_features shape: (B, max_slices, feature_dim) - for CT-FM it's (B, 1, 512)
+    actual_ctfm_dim = sample_batch['volume_features'].shape[2]   # Get feature_dim (512)
     actual_hand_dim = sample_batch['hand_features'].shape[1] if sample_batch.get('hand_features') is not None else 0
     actual_demo_dim = sample_batch['demo_features'].shape[1] if sample_batch.get('demo_features') is not None else 0
 
@@ -811,7 +827,7 @@ def train_single_fold(features_df: pd.DataFrame,
     
     # Save predictions with both thresholds
     predictions_df = pd.DataFrame({
-        'patient_id': test_ids,
+        'patient_id': test_results['patient_ids'],  # Use actual patient IDs from test results
         'true_label': test_results['labels'],
         'predicted_prob': test_results['predictions'],
         'predicted_label_default': (test_results['predictions'] >= 0.5).astype(int),

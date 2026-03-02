@@ -13,6 +13,7 @@ import numpy as np
 import pickle
 import random
 import sys
+import itertools
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -81,7 +82,7 @@ CONFIG = {
     
     # Reproducibility
     'base_seed': 42,
-    'n_repeats': 5,  # 5×5 repeated cross-validation (5 repeats × 5 folds = 25 runs)
+    'n_repeats': 1,  # Simple 5-fold cross-validation (no repetition)
     
     # IMPROVED LightGBM parameters for small datasets
     'lgb_params': {
@@ -101,15 +102,35 @@ CONFIG = {
         'verbose': -1,
         'seed': 42,
         'deterministic': True,
-        'force_col_wise': True  # Better for small datasets
+        'force_col_wise': True,  # Better for small datasets
+        'class_weight': 'balanced'
     },
     'num_boost_round': 1000,  # Increased - let early stopping decide
     'early_stopping_rounds': 100,  # Increased - more patience
     
     # Feature normalization
     'normalization_type': 'standard',
+    
+    # Grid search enable/disable
+    'use_grid_search': True,  # Set to True to enable hyperparameter search
 }
 
+
+# =============================================================================
+# GRID SEARCH CONFIGURATION
+# =============================================================================
+GRID_SEARCH_PARAMS = {
+    'num_leaves': [3, 5, 7],
+    'max_depth': [2, 3],
+    'min_data_in_leaf': [10, 15, 20],
+    'lambda_l1': [0.0, 0.5, 1.0],
+    'lambda_l2': [0.0, 0.5, 1.0],
+    'feature_fraction': [0.6, 0.7, 0.8],
+    'bagging_fraction': [0.6, 0.7, 0.8]
+}
+
+# Total combinations: 3*2*3*3*3*3*3 = 1458 parameter combinations
+# With early stopping, each will be fast for small datasets
 
 
 
@@ -129,6 +150,10 @@ HAND_FEATURE_COLS = [
 # Demographic features
 DEMO_FEATURE_COLS = ['Age', 'Sex', 'SmokingStatus']
 
+# FVC baseline feature (most important clinical measure)
+# Loaded from ground_truth.csv as 'BaselineFVC', renamed to 'baselinefvc' for consistency
+FVC_BASELINE_COL = 'baselinefvc'
+
 
 # =============================================================================
 # ABLATION STUDY CONFIGURATIONS (ESSENTIAL EXPERIMENTS ONLY)
@@ -145,6 +170,7 @@ ABLATION_CONFIGS = {
         "pca": False,
         "hand": True,
         "demo": False,
+        "fvc_baseline": False,
         "description": "Hand-crafted features only (Clinical Baseline)"
     },
     
@@ -153,6 +179,7 @@ ABLATION_CONFIGS = {
         "pca": False,
         "hand": True,
         "demo": True,
+        "fvc_baseline": False,
         "description": "Hand-crafted + Demographics (Clinical Baseline)"
     },
     
@@ -162,6 +189,7 @@ ABLATION_CONFIGS = {
         "pca": False,
         "hand": False,
         "demo": False,
+        "fvc_baseline": False,
         "description": "CNN mean pooling (Best CNN Configuration)"
     },
     
@@ -171,6 +199,7 @@ ABLATION_CONFIGS = {
         "pca": False,
         "hand": True,
         "demo": True,
+        "fvc_baseline": False,
         "description": "CNN + Hand-crafted + Demographics (FULL MODEL)"
     },
 
@@ -179,7 +208,83 @@ ABLATION_CONFIGS = {
         "pca": False,
         "hand": False,
         "demo": True,
+        "fvc_baseline": False,
         "description": "CNN + Demographics (Ablation without hand-crafted)"
+    },
+    
+    # ==========================================================================
+    # CRITICAL TEST: FVC BASELINE vs IMAGING
+    # ==========================================================================
+    # Does a single clinical measure (FVC at week 0) outperform all imaging?
+    # This is the honest, publishable comparison that shows true clinical value.
+    
+    "hand_only_fvc0": {
+        "cnn": None,
+        "pca": False,
+        "hand": True,
+        "demo": False,
+        "fvc_baseline": True,
+        "description": "❗ Hand-crafted + FVC(0) [CLINICAL BENCHMARK - Expected AUC>0.65]"
+    },
+    
+    "best_cnn_hand_fvc0": {
+        "cnn": "mean",
+        "pca": False,
+        "hand": True,
+        "demo": False,
+        "fvc_baseline": True,
+        "description": "❗ CNN + Hand + FVC(0) [Does imaging add value over FVC?]"
+    },
+    
+    "best_cnn_hand_demo_fvc0": {
+        "cnn": "mean",
+        "pca": False,
+        "hand": True,
+        "demo": True,
+        "fvc_baseline": True,
+        "description": "❗ FULLY LOADED [Everything: CNN + Hand + Demo + FVC(0)]"
+    },
+    
+    # ==========================================================================
+    # PCA CONFIGURATIONS: Test dimensionality reduction on CNN embeddings
+    # ==========================================================================
+    # PCA can help with high-dimensional CNN features (2048-d) by reducing noise
+    # and preventing overfitting on small datasets (83 patients)
+    
+    "cnn_mean_pca": {
+        "cnn": "mean",
+        "pca": True,
+        "hand": False,
+        "demo": False,
+        "fvc_baseline": False,
+        "description": "🔬 CNN mean pooling + PCA [Test dimensionality reduction]"
+    },
+    
+    "best_cnn_hand_pca": {
+        "cnn": "mean",
+        "pca": True,
+        "hand": True,
+        "demo": False,
+        "fvc_baseline": False,
+        "description": "🔬 CNN + Hand-crafted + PCA [Reduced CNN dimensions]"
+    },
+    
+    "best_cnn_hand_demo_pca": {
+        "cnn": "mean",
+        "pca": True,
+        "hand": True,
+        "demo": True,
+        "fvc_baseline": False,
+        "description": "🔬 CNN + Hand + Demo + PCA [Full model with PCA]"
+    },
+    
+    "best_cnn_hand_fvc0_pca": {
+        "cnn": "mean",
+        "pca": True,
+        "hand": True,
+        "demo": False,
+        "fvc_baseline": True,
+        "description": "🔬 CNN + Hand + FVC(0) + PCA [Clinical + PCA-reduced imaging]"
     },
 }
 
@@ -327,7 +432,7 @@ def apply_pooling_to_slices(
 # =============================================================================
 
 def load_and_merge_demographics(train_csv_path: Path, patient_features_df: pd.DataFrame) -> pd.DataFrame:
-    """Load demographics and merge with patient features"""
+    """Load demographics from train.csv and merge with patient features"""
     train_df = pd.read_csv(train_csv_path)
     
     print("\n" + "="*70)
@@ -353,8 +458,17 @@ def load_and_merge_demographics(train_csv_path: Path, patient_features_df: pd.Da
 
 
 def load_ground_truth(gt_path: Path) -> pd.DataFrame:
-    """Load ground truth labels"""
+    """Load ground truth labels and FVC baseline (same as FVC prediction code)"""
     gt_df = pd.read_csv(gt_path)
+    
+    # Rename BaselineFVC to baselinefvc for consistency with FVC prediction code
+    if 'BaselineFVC' in gt_df.columns:
+        gt_df['baselinefvc'] = gt_df['BaselineFVC']
+        print(f"\n⭐ Loaded FVC baseline from ground truth:")
+        print(f"  Mean: {gt_df['baselinefvc'].mean():.0f} mL")
+        print(f"  Std:  {gt_df['baselinefvc'].std():.0f} mL")
+        print(f"  Range: [{gt_df['baselinefvc'].min():.0f}, {gt_df['baselinefvc'].max():.0f}] mL")
+    
     print(f"\nGround truth: {len(gt_df)} patients")
     print(f"  Progression: {gt_df['has_progressed'].sum()}")
     print(f"  No progression: {(~gt_df['has_progressed'].astype(bool)).sum()}")
@@ -363,62 +477,36 @@ def load_ground_truth(gt_path: Path) -> pd.DataFrame:
 
 def create_repeated_kfold_splits(kfold_splits_base, n_repeats, base_seed):
     """
-    Create repeated K-fold splits for repeated cross-validation
-    
-    STRATEGY: For computational efficiency, we use the same patient fold assignments 
-    across all repetitions but vary the random seed for training initialization.
-    This provides robustness through different:
-    - Model initializations (LightGBM random seeds)
-    - Data shuffling within training
-    - Early stopping variations
-    
-    For even more robust repeated CV, you should pre-generate multiple 
-    stratified split files with different random seeds and load them here.
+    Prepare K-fold splits (supports single or repeated CV).
+    With n_repeats=1, returns simple 5-fold CV.
     
     Args:
-        kfold_splits_base: Base K-fold splits (1 repetition)
-        n_repeats: Number of repetitions
+        kfold_splits_base: Base K-fold splits
+        n_repeats: Number of repetitions (1 = no repetition)
         base_seed: Base random seed
     
     Returns:
         repeated_splits: Dict with structure {repeat_idx: {fold_idx: fold_data}}
     """
-    from sklearn.model_selection import StratifiedKFold
-    
     print(f"\n{'='*70}")
-    print("CREATING REPEATED K-FOLD SPLITS")
+    print("LOADING K-FOLD SPLITS")
     print(f"{'='*70}")
     print(f"Base folds: {len(kfold_splits_base)}")
     print(f"Repeats: {n_repeats}")
-    print(f"Total runs: {len(kfold_splits_base) * n_repeats}")
     
     repeated_splits = {}
-    
-    # First repetition: use existing splits
     repeated_splits[0] = kfold_splits_base
-    print(f"  Repeat 0: Using existing stratified splits")
     
-    # Create additional repetitions with different seeds
-    # We need to recreate the splits from scratch with different random seeds
-    # Get all patient IDs and labels from first split
-    all_patients = set()
-    for fold_data in kfold_splits_base.values():
-        all_patients.update(fold_data['train'])
-        all_patients.update(fold_data['val'])
-        all_patients.update(fold_data['test'])
-    
-    # For now, just use the base splits with shuffled patient assignment
-    # In practice, you should regenerate from StratifiedKFold with different seeds
-    for repeat_idx in range(1, n_repeats):
-        repeat_seed = base_seed + (repeat_idx * 1000)
-        np.random.seed(repeat_seed)
-        
-        # Create new splits with different seed
-        # Note: This is a simplified approach - ideally load pre-generated splits
-        repeated_splits[repeat_idx] = kfold_splits_base.copy()
-        print(f"  Repeat {repeat_idx}: Seed {repeat_seed} (using base stratification)")
-    
-    print(f"\n✓ Created {len(repeated_splits)} repetitions × {len(kfold_splits_base)} folds = {len(repeated_splits) * len(kfold_splits_base)} total runs")
+    if n_repeats == 1:
+        print(f"✓ Using simple {len(kfold_splits_base)}-fold stratified cross-validation")
+    else:
+        print(f"✓ Using {n_repeats}×{len(kfold_splits_base)} repeated cross-validation")
+        # Create additional repetitions if needed
+        for repeat_idx in range(1, n_repeats):
+            repeat_seed = base_seed + (repeat_idx * 1000)
+            np.random.seed(repeat_seed)
+            repeated_splits[repeat_idx] = kfold_splits_base.copy()
+            print(f"  Repeat {repeat_idx}: Seed {repeat_seed}")
     
     return repeated_splits
 
@@ -452,7 +540,7 @@ def build_feature_matrix(patient_features_df, embeddings_df, config,
     
     patient_level_df = patient_features_df.groupby('Patient').first().reset_index()
     
-    # Start with patient base
+    # Merge with embeddings if CNN features requested
     if config['cnn'] is not None and embeddings_df is not None:
         combined_df = patient_level_df.merge(
             embeddings_df[['patient_id', 'embeddings']],
@@ -470,7 +558,8 @@ def build_feature_matrix(patient_features_df, embeddings_df, config,
     feature_groups = {
         'cnn_embeddings': [],
         'hand_crafted': [],
-        'demographics': []
+        'demographics': [],
+        'fvc_baseline': []
     }
     
     # Add CNN embeddings if requested
@@ -498,6 +587,19 @@ def build_feature_matrix(patient_features_df, embeddings_df, config,
         feature_groups['demographics'] = available_demo
         all_features.extend(available_demo)
         print(f"  Demographics: {len(available_demo)}")
+    
+    # Add FVC baseline if requested (CRITICAL CLINICAL MEASURE)
+    # NOTE: FVC baseline must be in patient_features_df (merged from ground truth)
+    if config.get('fvc_baseline', False):
+        if FVC_BASELINE_COL in combined_df.columns:
+            feature_groups['fvc_baseline'] = [FVC_BASELINE_COL]
+            all_features.append(FVC_BASELINE_COL)
+            fvc_mean = combined_df[FVC_BASELINE_COL].mean()
+            fvc_std = combined_df[FVC_BASELINE_COL].std()
+            print(f"  ⭐ FVC Baseline: 1 feature (mean={fvc_mean:.0f}±{fvc_std:.0f} mL) [MOST IMPORTANT]")
+        else:
+            print(f"  ⚠️  FVC Baseline requested but '{FVC_BASELINE_COL}' not found in data")
+            print(f"      Available columns: {[c for c in combined_df.columns if 'fvc' in c.lower() or 'FVC' in c]}")
     
     print(f"\nTotal features: {len(all_features)}")
     
@@ -874,6 +976,130 @@ def plot_fold_diagnostics(fold_results, save_dir):
 
 
 # =============================================================================
+# GRID SEARCH
+# =============================================================================
+
+def perform_grid_search(X_train, y_train, X_val, y_val, base_params, param_grid, num_boost_round=1000, early_stopping_rounds=100):
+    """
+    Perform grid search for LightGBM hyperparameters using validation set for evaluation.
+    
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        X_val: Validation features
+        y_val: Validation labels
+        base_params: Base LightGBM parameters (objective, metric, etc.)
+        param_grid: Dictionary of parameters to search
+        num_boost_round: Maximum number of boosting rounds
+        early_stopping_rounds: Early stopping patience
+        
+    Returns:
+        best_params: Dictionary with best parameters
+        best_auc: Best validation AUC achieved
+        search_results: List of all combinations and their results
+    """
+    
+    print(f"\n{'='*70}")
+    print("GRID SEARCH FOR OPTIMAL HYPERPARAMETERS")
+    print(f"{'='*70}")
+    
+    # Generate all parameter combinations
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    param_combinations = list(itertools.product(*param_values))
+    
+    total_combinations = len(param_combinations)
+    print(f"Total parameter combinations to test: {total_combinations}")
+    print(f"Parameters to search: {param_names}")
+    for name, values in param_grid.items():
+        print(f"  {name}: {values}")
+    
+    # Prepare data
+    train_data = lgb.Dataset(X_train, label=y_train)
+    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+    
+    best_auc = 0
+    best_params = None
+    search_results = []
+    first_error = None  # Track first error for debugging
+    
+    print(f"\nStarting grid search...")
+    for idx, param_values_tuple in enumerate(tqdm(param_combinations, desc="Grid Search")):
+        # Create parameter dictionary for this combination
+        params_to_test = base_params.copy()
+        for param_name, param_value in zip(param_names, param_values_tuple):
+            params_to_test[param_name] = param_value
+        
+        # Train model with early stopping
+        callbacks = [lgb.early_stopping(early_stopping_rounds)]
+        
+        try:
+            model = lgb.train(
+                params_to_test,
+                train_data,
+                num_boost_round=num_boost_round,
+                valid_sets=[val_data],
+                valid_names=['valid'],
+                callbacks=callbacks
+            )
+            
+            # Evaluate on validation set
+            val_preds = model.predict(X_val, num_iteration=model.best_iteration)
+            val_auc = roc_auc_score(y_val, val_preds)
+            
+            # Store results
+            result = {
+                'params': dict(zip(param_names, param_values_tuple)),
+                'val_auc': val_auc,
+                'best_iteration': model.best_iteration
+            }
+            search_results.append(result)
+            
+            # Update best parameters
+            if val_auc > best_auc:
+                best_auc = val_auc
+                best_params = params_to_test.copy()
+                print(f"\n🎯 New best AUC: {val_auc:.4f} with params: {result['params']}")
+                
+        except Exception as e:
+            # Store first error for debugging
+            if first_error is None:
+                first_error = str(e)
+            # Don't print "Failed combination" multiple times - just count failures
+            # print(f"\n⚠️ Failed combination {idx+1}: {e}")
+            continue
+    
+    print(f"\n{'='*70}")
+    print("GRID SEARCH COMPLETE")
+    print(f"{'='*70}")
+    print(f"Total combinations tested: {total_combinations}")
+    print(f"Successful combinations: {len(search_results)}")
+    print(f"Failed combinations: {total_combinations - len(search_results)}")
+    
+    # Check if any successful combinations were found
+    if best_params is None or len(search_results) == 0:
+        print("❌ ERROR: No successful parameter combinations found!")
+        print("   All grid search combinations failed.")
+        if first_error:
+            print(f"   First error encountered: {first_error}")
+        print("   Using default parameters from config instead.")
+        return base_params, 0.0, []
+    
+    print(f"Best Validation AUC: {best_auc:.4f}")
+    print(f"Best Parameters:")
+    for param_name in param_names:
+        print(f"  {param_name}: {best_params[param_name]}")
+    
+    # Sort and show top 5 results
+    search_results.sort(key=lambda x: x['val_auc'], reverse=True)
+    print(f"\nTop 5 parameter combinations:")
+    for i, result in enumerate(search_results[:5]):
+        print(f"  {i+1}. AUC={result['val_auc']:.4f}, Params={result['params']}")
+    
+    return best_params, best_auc, search_results
+
+
+# =============================================================================
 # TRAINING
 # =============================================================================
 
@@ -919,16 +1145,20 @@ def train_single_fold(
                             left_on='Patient', right_on='PatientID', how='left')
     
     # -----------------------------------
-    # STEP 0: Preprocess Demographics (SOPHISTICATED)
+    # STEP 0: Preprocess Demographics + FVC Baseline (SOPHISTICATED)
     # -----------------------------------
     # Identify demographic features in the feature list
     demo_features_in_data = [f for f in DEMO_FEATURE_COLS if f in feature_cols]
+    fvc_in_data = FVC_BASELINE_COL in feature_cols
     
-    if demo_features_in_data:
+    if demo_features_in_data or fvc_in_data:
         print(f"\n{'='*70}")
-        print(f"STEP 0: DEMOGRAPHICS PREPROCESSING (fit on train only)")
+        print(f"STEP 0: PREPROCESSING CONTINUOUS FEATURES (fit on train only)")
         print(f"{'='*70}")
-        print(f"Found demographic features: {demo_features_in_data}")
+        if demo_features_in_data:
+            print(f"Found demographic features: {demo_features_in_data}")
+        if fvc_in_data:
+            print(f"⭐ Found FVC Baseline: {FVC_BASELINE_COL} (CRITICAL CLINICAL MEASURE)")
         
         train_df, val_df, test_df, demo_encoding_info, new_demo_cols = preprocess_demographics(
             train_df=train_df,
@@ -941,17 +1171,52 @@ def train_single_fold(
         # Update feature_cols: replace original demo features with new preprocessed ones
         updated_feature_cols = [f for f in feature_cols if f not in demo_features_in_data]
         updated_feature_cols.extend(new_demo_cols)
+        
+        # Handle FVC baseline normalization (critical for model performance)
+        if fvc_in_data:
+            print(f"\n=== PREPROCESSING FVC BASELINE ===")    
+            fvc_col_name = FVC_BASELINE_COL  # 'baselinefvc'
+            
+            if fvc_col_name not in train_df.columns:
+                print(f"  ⚠️ ERROR: '{fvc_col_name}' not found in dataframe!")
+                print(f"      Available columns: {train_df.columns.tolist()}")
+            else:
+                print(f"  Pre-normalization (Training Set):")
+                print(f"    Mean: {train_df[fvc_col_name].mean():.0f} mL")
+                print(f"    Std: {train_df[fvc_col_name].std():.0f} mL")
+                print(f"    Range: [{train_df[fvc_col_name].min():.0f}, {train_df[fvc_col_name].max():.0f}] mL")
+                
+                # Normalize FVC using StandardScaler (same as Age)
+                fvc_scaler = StandardScaler()
+                fvc_scaler.fit(train_df[[fvc_col_name]].values)
+                train_df['FVC_normalized'] = fvc_scaler.transform(train_df[[fvc_col_name]].values)
+                val_df['FVC_normalized'] = fvc_scaler.transform(val_df[[fvc_col_name]].values)
+                test_df['FVC_normalized'] = fvc_scaler.transform(test_df[[fvc_col_name]].values)
+                
+                print(f"  Post-normalization (Training Set):")
+                print(f"    Mean: {train_df['FVC_normalized'].mean():.4f}")
+                print(f"    Std: {train_df['FVC_normalized'].std():.4f}")
+                
+                # Replace baselinefvc with FVC_normalized in feature list
+                updated_feature_cols = [f if f != fvc_col_name else 'FVC_normalized' for f in updated_feature_cols]
+                print(f"  ✓ FVC baseline normalized and ready for training")
+        
         feature_cols = updated_feature_cols
         
         print(f"\n✓ Feature columns updated:")
-        print(f"  Removed: {demo_features_in_data}")
-        print(f"  Added: {new_demo_cols}")
+        if demo_features_in_data:
+            print(f"  Removed: {demo_features_in_data}")
+            print(f"  Added: {new_demo_cols}")
+        if fvc_in_data:
+            print(f"  Normalized: {FVC_BASELINE_COL} → FVC_normalized")
     
     # Handle missing values in features
     for col in feature_cols:
         if train_df[col].isnull().any():
-            if col in HAND_FEATURE_COLS or col == 'Age' or col == 'Age_normalized':
+            # Use median for continuous clinical/hand-crafted features
+            if col in HAND_FEATURE_COLS or col in ['Age', 'Age_normalized', 'FVC_normalized', FVC_BASELINE_COL]:
                 fill_value = train_df[col].median()
+                print(f"  Filling {col} missing values with median: {fill_value:.2f}")
             else:
                 fill_value = 0
             train_df[col] = train_df[col].fillna(fill_value)
@@ -962,7 +1227,7 @@ def train_single_fold(
     X_val, y_val = val_df[feature_cols].values, val_df['has_progressed'].values.astype(int)
     X_test, y_test = test_df[feature_cols].values, test_df['has_progressed'].values.astype(int)
     
-    print(f"\nAfter demographics preprocessing:")
+    print(f"\nAfter preprocessing (demographics + FVC baseline):")
     print(f"  Features: {X_train.shape[1]} | Train: {X_train.shape[0]} | Val: {X_val.shape[0]} | Test: {X_test.shape[0]}")
     
     # -----------------------------------
@@ -1019,7 +1284,7 @@ def train_single_fold(
     print(f"  Test  - Pos: {y_test.sum()}/{len(y_test)} ({y_test.mean()*100:.1f}%)")
     
     # -----------------------------------
-    # STEP 3: Train LightGBM
+    # STEP 3: Train LightGBM (with optional grid search)
     # -----------------------------------
     print("\n" + "="*70)
     print("TRAINING LIGHTGBM")
@@ -1030,14 +1295,50 @@ def train_single_fold(
     
     callbacks = [lgb.early_stopping(config['early_stopping_rounds'])]
     
-    model = lgb.train(
-        config['lgb_params'],
-        train_data,
-        num_boost_round=config['num_boost_round'],
-        valid_sets=[train_data, val_data],
-        valid_names=['train', 'valid'],
-        callbacks=callbacks
-    )
+    # Use grid search if enabled in config
+    if config.get('use_grid_search', False):
+        print("🔍 Grid search ENABLED - searching for optimal hyperparameters...")
+        
+        # Perform grid search
+        best_params, best_val_auc, search_results = perform_grid_search(
+            X_train, y_train, X_val, y_val,
+            base_params=config['lgb_params'],
+            param_grid=GRID_SEARCH_PARAMS,
+            num_boost_round=config['num_boost_round'],
+            early_stopping_rounds=config['early_stopping_rounds']
+        )
+        
+        # Train final model with best parameters
+        print("\n🎯 Training final model with best parameters...")
+        model = lgb.train(
+            best_params,
+            train_data,
+            num_boost_round=config['num_boost_round'],
+            valid_sets=[train_data, val_data],
+            valid_names=['train', 'valid'],
+            callbacks=callbacks
+        )
+        
+        # Save grid search results
+        grid_search_path = fold_dir / "grid_search_results.pkl"
+        with open(grid_search_path, 'wb') as f:
+            pickle.dump({
+                'best_params': best_params,
+                'best_val_auc': best_val_auc,
+                'search_results': search_results
+            }, f)
+        print(f"✓ Grid search results saved to: {grid_search_path}")
+        
+    else:
+        print("Using default hyperparameters (grid search disabled)")
+        model = lgb.train(
+            config['lgb_params'],
+            train_data,
+            num_boost_round=config['num_boost_round'],
+            valid_sets=[train_data, val_data],
+            valid_names=['train', 'valid'],
+            callbacks=callbacks
+        )
     
     print(f"\n✓ Training complete! Best iteration: {model.best_iteration}")
     
@@ -1231,16 +1532,18 @@ def run_single_ablation_experiment(exp_name, exp_config, patient_features_df, gt
         embeddings_df = None
         print(f"\nNo CNN embeddings (tabular features only)")
     
-    # Train all folds across all repetitions (5×5 = 25 runs)
+    # Train all folds
     fold_results = []
     total_runs = 0
     
     for repeat_idx in sorted(repeated_kfold_splits.keys()):
         kfold_splits = repeated_kfold_splits[repeat_idx]
         
-        print(f"\n{'='*70}")
-        print(f"REPETITION {repeat_idx + 1}/{len(repeated_kfold_splits)}")
-        print(f"{'='*70}")
+        # Only show repetition header if actually using repeated CV (n_repeats > 1)
+        if config['n_repeats'] > 1:
+            print(f"\n{'='*70}")
+            print(f"REPETITION {repeat_idx + 1}/{len(repeated_kfold_splits)}")
+            print(f"{'='*70}")
         
         for fold_idx in sorted(kfold_splits.keys()):
             total_runs += 1
@@ -1255,10 +1558,15 @@ def run_single_ablation_experiment(exp_name, exp_config, patient_features_df, gt
                 HAND_FEATURE_COLS, DEMO_FEATURE_COLS
             )
             
-            # Create unique fold identifier for this repetition
-            unique_fold_id = f"rep{repeat_idx}_fold{fold_idx}"
+            # Create fold identifier (simpler when n_repeats=1)
+            if config['n_repeats'] == 1:
+                unique_fold_id = f"fold{fold_idx}"
+                run_label = f"Fold {fold_idx}"
+            else:
+                unique_fold_id = f"rep{repeat_idx}_fold{fold_idx}"
+                run_label = f"Repeat {repeat_idx}, Fold {fold_idx}"
             
-            print(f"\n[Run {total_runs}/{len(repeated_kfold_splits) * len(kfold_splits)}] Repeat {repeat_idx}, Fold {fold_idx}")
+            print(f"\n[Run {total_runs}/{len(repeated_kfold_splits) * len(kfold_splits)}] {run_label}")
             
             # Train (PCA and scaling are handled inside train_single_fold)
             result = train_single_fold(
@@ -1266,9 +1574,10 @@ def run_single_ablation_experiment(exp_name, exp_config, patient_features_df, gt
                 feature_cols, feature_groups, exp_dir, exp_config, fold_data['train']
             )
             
-            # Add repetition info to result
-            result['repeat_idx'] = repeat_idx
-            result['original_fold_idx'] = fold_idx
+            # Add repetition info only if using repeated CV
+            if config['n_repeats'] > 1:
+                result['repeat_idx'] = repeat_idx
+                result['original_fold_idx'] = fold_idx
             
             fold_results.append(result)
     
@@ -1280,14 +1589,14 @@ def run_single_ablation_experiment(exp_name, exp_config, patient_features_df, gt
     test_specificities = [r['test_specificity'] for r in fold_results]
     
     print(f"\n{'='*70}")
-    print(f"EXPERIMENT {exp_name} RESULTS ({len(fold_results)} runs: {config['n_repeats']} repeats × {len(repeated_kfold_splits[0])} folds)")
+    print(f"EXPERIMENT {exp_name} RESULTS ({len(fold_results)} folds)")
     print(f"{'='*70}")
     print(f"Test AUC:         {np.mean(test_aucs):.4f} ± {np.std(test_aucs):.4f}")
     print(f"Test F1:          {np.mean(test_f1s):.4f} ± {np.std(test_f1s):.4f}")
     print(f"Test Recall:      {np.mean(test_recalls):.4f} ± {np.std(test_recalls):.4f}")
     print(f"Test Precision:   {np.mean(test_precisions):.4f} ± {np.std(test_precisions):.4f}")
     print(f"Test Specificity: {np.mean(test_specificities):.4f} ± {np.std(test_specificities):.4f}")
-    print(f"\n  (Averaged across {config['n_repeats']} repeated {len(repeated_kfold_splits[0])}-fold cross-validations)")
+    print(f"\n  (Averaged across {len(repeated_kfold_splits[0])}-fold cross-validation)")
     
     # Save fold results
     summary_df = pd.DataFrame([{k: v for k, v in r.items() if k not in ['test_y_true', 'test_y_pred', 'test_y_pred_binary']} 
@@ -1328,13 +1637,42 @@ def main():
     
     set_seed(CONFIG['base_seed'])
     
-    base_results_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\lightgbm_ablation_resnt50")
+    base_results_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\lightgbm_fvc_0")
     base_results_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
     patient_features_df = pd.read_csv(CONFIG['patient_features_path'])
     patient_features_df = load_and_merge_demographics(CONFIG['train_csv_path'], patient_features_df)
     gt_df = load_ground_truth(CONFIG['gt_path'])
+    
+    # =========================================================================
+    # CRITICAL: Merge FVC baseline from ground truth into patient features
+    # =========================================================================
+    # Same approach as FVC prediction code: BaselineFVC from ground_truth.csv
+    print(f"\n{'='*70}")
+    print("MERGING FVC BASELINE FROM GROUND TRUTH")
+    print(f"{'='*70}")
+    
+    if 'baselinefvc' in gt_df.columns:
+        # Merge FVC baseline: ground truth has 'PatientID', patient_features has 'Patient'
+        fvc_data = gt_df[['PatientID', 'baselinefvc']].copy()
+        patient_features_df = patient_features_df.merge(
+            fvc_data, 
+            left_on='Patient', 
+            right_on='PatientID', 
+            how='left'
+        )
+        patient_features_df.drop('PatientID', axis=1, inplace=True, errors='ignore')
+        
+        n_patients = len(patient_features_df['Patient'].unique())
+        n_with_fvc = patient_features_df['baselinefvc'].notna().sum()
+        print(f"  ✓ Merged FVC baseline for {n_with_fvc}/{n_patients} patients")
+        
+        if n_with_fvc < n_patients:
+            print(f"  ⚠️  {n_patients - n_with_fvc} patients missing FVC baseline")
+    else:
+        print(f"  ⚠️  Could not find 'baselinefvc' in ground truth CSV")
+        print(f"      Available columns: {gt_df.columns.tolist()}")
     
     # Load base K-fold splits
     with open(CONFIG['kfold_splits_path'], 'rb') as f:
@@ -1346,10 +1684,24 @@ def main():
     print("="*80)
     print(f"CNN Model: {CONFIG['cnn_model']}")
     print(f"Pooling strategy: mean (proven best)")
-    print(f"Cross-validation: {CONFIG['n_repeats']}×{len(kfold_splits_base)} repeated CV ({CONFIG['n_repeats'] * len(kfold_splits_base)} runs per experiment)")
-    print(f"\nExperiments (4 total):")
+    print(f"Cross-validation: {len(kfold_splits_base)}-fold stratified CV")
+    print(f"\nExperiments ({len(ABLATION_CONFIGS)} total):")
     for exp_name, exp_config in ABLATION_CONFIGS.items():
-        print(f"  {exp_name}: {exp_config['description']}")
+        fvc_marker = " + FVC(0)" if exp_config.get('fvc_baseline', False) else ""
+        print(f"  {exp_name}{fvc_marker}: {exp_config['description']}")
+    
+    print(f"\n{'='*80}")
+    print("❗ CRITICAL TEST: FVC BASELINE vs IMAGING")
+    print("="*80)
+    print("If 'hand_only_fvc0' (clinical baseline + FVC) outperforms")
+    print("'best_cnn_hand' (imaging + hand-crafted without FVC),")
+    print("it proves that a single clinical measure (FVC at week 0)")
+    print("is more predictive than all CT imaging features.")
+    print("\nThis is an HONEST, PUBLISHABLE result that shows:")
+    print("  ✓ True clinical value hierarchy")
+    print("  ✓ When imaging adds incremental value")
+    print("  ✓ Computational cost/benefit trade-offs")
+    print("="*80)
     
     # Create repeated K-fold splits for repeated cross-validation
     repeated_kfold_splits = create_repeated_kfold_splits(
@@ -1514,11 +1866,11 @@ def main():
     print(f"   {best_exp[1]['config']['description']}")
     print(f"   Mean AUC: {best_exp[1]['mean_auc']:.4f} ± {best_exp[1]['std_auc']:.4f}")
     print(f"   Mean F1:  {best_exp[1]['mean_f1']:.4f} ± {best_exp[1]['std_f1']:.4f}")
-    print(f"   (Based on {len(best_exp[1]['fold_results'])} runs: {CONFIG['n_repeats']}×{len(kfold_splits_base)}-fold repeated CV)")
+    print(f"   (Based on {len(kfold_splits_base)}-fold stratified cross-validation)")
     print(f"{'='*80}")
     
     print("\n✓ ABLATION STUDY COMPLETE!")
-    print(f"✓ Repeated Cross-Validation: {CONFIG['n_repeats']} repeats × {len(kfold_splits_base)} folds = {CONFIG['n_repeats'] * len(kfold_splits_base)} runs per experiment")
+    print(f"✓ Cross-Validation: {len(kfold_splits_base)}-fold stratified")
     print(f"Results saved to: {base_results_dir}")
 
 

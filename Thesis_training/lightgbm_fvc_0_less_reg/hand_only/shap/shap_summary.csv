@@ -1,0 +1,10 @@
+feature,display_name,group,mean_abs_shap,std_abs_shap
+Avg_NumTissuePixel_30_60,Avg. Tissue Pixels,Hand-crafted,0.05995733533361196,0.05008733665049347
+Kurtosis_30_60,HU Kurtosis,Hand-crafted,0.024956249987459166,0.02348718148510144
+Skew_30_60,HU Skewness,Hand-crafted,0.020930784157749162,0.021637333636589425
+Avg_TissueByLung_30_60,Tissue/Lung Ratio,Hand-crafted,0.02044191445511356,0.025492606633506405
+Avg_TissueByTotal_30_60,Tissue/Total Ratio,Hand-crafted,0.019196216670386738,0.025125570470555334
+Avg_Tissue_thickness_30_60,Avg. Tissue Thickness,Hand-crafted,0.01887534773551603,0.018719223070082603
+ApproxVol_30_60,Approx. Volume,Hand-crafted,0.018098480917993428,0.013989835140572372
+Mean_30_60,Mean HU,Hand-crafted,0.011337066846196795,0.012199059115115424
+Avg_Tissue_30_60,Avg. Tissue HU,Hand-crafted,0.010328976208701865,0.01053786750350727

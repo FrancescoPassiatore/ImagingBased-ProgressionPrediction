@@ -1,0 +1,15 @@
+feature,display_name,group,mean_abs_shap,std_abs_shap
+Avg_NumTissuePixel_30_60,Avg. Tissue Pixels,Hand-crafted,0.09731777504038666,0.11518584880044061
+Avg_Tissue_thickness_30_60,Avg. Tissue Thickness,Hand-crafted,0.022696034271417094,0.02924978945559118
+Skew_30_60,HU Skewness,Hand-crafted,0.02142045055891669,0.02700427278124727
+Kurtosis_30_60,HU Kurtosis,Hand-crafted,0.01932243004749927,0.024178236997532073
+Avg_TissueByLung_30_60,Tissue/Lung Ratio,Hand-crafted,0.017335568211161615,0.02546868016144504
+Avg_Tissue_30_60,Avg. Tissue HU,Hand-crafted,0.010435949257480374,0.01768190884806334
+Smoking_1,Ex-smoker,Demographics,0.007463529216500868,0.013041348910672953
+Age_normalized,Age (normalised),Demographics,0.006875847831966232,0.012189913251851777
+Avg_TissueByTotal_30_60,Tissue/Total Ratio,Hand-crafted,0.006234850719313059,0.007996797849557279
+ApproxVol_30_60,Approx. Volume,Hand-crafted,0.005805948705530154,0.006632788813478097
+Mean_30_60,Mean HU,Hand-crafted,0.0029928652436811273,0.00504912729086841
+Sex_encoded,Sex,Demographics,0.0,0.0
+Smoking_0,Non-smoker,Demographics,0.0,0.0
+Smoking_2,Current smoker,Demographics,0.0,0.0

@@ -11,10 +11,12 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import ttest_rel
 import random
 sys.path.append(str(Path(__file__).parent.parent))
+
+# Note: CTFMFeatureExtractor and IPFDataLoader no longer needed - using pre-computed embeddings
 from utilities import (
-    CTFMFeatureExtractor,
-    IPFDataLoader,create_dataloaders,compute_class_weights
-    )
+    create_dataloaders,
+    compute_class_weights
+)
 
 from model_train import (
     ProgressionPredictionModel,
@@ -26,7 +28,7 @@ from model_train import (
     plot_validation_roc_with_thresholds,
     aggregate_fold_results,
     train_single_fold
-    )
+)
 
 
 # ============================================================================
@@ -54,55 +56,33 @@ ABLATION_CONFIGS = {
     },
     
     # ========== BLOCK 2: IMAGING ONLY ==========
-    # Deep learning on small dataset - show instability
+    # CT-FM patient-level embeddings without clinical features
     
-    '2_cnn_mean': {
+    '2_ctfm_only': {
         'use_ctfm_features': True,
         'use_hand_features': False,
         'use_demographics': False,
-        'description': '[BLOCK 2] CT-FM with mean pooling',
-        'block': 'Imaging Only',
-        'pooling_type': 'mean'
-    },
-    
-    '2_cnn_max': {
-        'use_ctfm_features': True,
-        'use_hand_features': False,
-        'use_demographics': False,
-        'description': '[BLOCK 2] CT-FM with max pooling',
-        'block': 'Imaging Only',
-        'pooling_type': 'max'
-    },
-    
-    '2_cnn_max_mean': {
-        'use_ctfm_features': True,
-        'use_hand_features': False,
-        'use_demographics': False,
-        'description': '[BLOCK 2] CT-FM with max+mean pooling (concatenated)',
-        'block': 'Imaging Only',
-        'pooling_type': 'max_mean'
+        'description': '[BLOCK 2] CT-FM embeddings only',
+        'block': 'Imaging Only'
     },
     
     # ========== BLOCK 3: FULL MODEL ==========
     # Multimodal fusion - imaging + clinical
-    # Uses pooling_type from BASE_CONFIG (set manually after BLOCK 2 results)
     
-    '3_cnn_hand': {
+    '3_ctfm_hand': {
         'use_ctfm_features': True,
         'use_hand_features': True,
         'use_demographics': False,
         'description': '[BLOCK 3] CT-FM + Hand-crafted',
         'block': 'Full Model'
-        # No pooling_type override - uses BASE_CONFIG['pooling_type']
     },
     
-    '3_cnn_hand_demo': {
+    '3_ctfm_hand_demo': {
         'use_ctfm_features': True,
         'use_hand_features': True,
         'use_demographics': True,
         'description': '[BLOCK 3] CT-FM + Hand-crafted + Demographics (FULL)',
         'block': 'Full Model'
-        # No pooling_type override - uses BASE_CONFIG['pooling_type']
     },
 }
 
@@ -527,13 +507,30 @@ def create_feature_set_for_fold(
     
     # Merge patient-level features
     if len(patient_level_cols) > 1:
+        # First, check for duplicates in patient_features_df
+        patient_features_subset = patient_features_df[patient_level_cols].copy()
+        dup_mask = patient_features_subset['Patient'].duplicated()
+        if dup_mask.any():
+            print(f"\n  ⚠️ WARNING: patient_features_df has {dup_mask.sum()} duplicate patients, keeping first")
+            patient_features_subset = patient_features_subset.drop_duplicates(subset='Patient', keep='first')
+        
         result_df = result_df.merge(
-            patient_features_df[patient_level_cols],
+            patient_features_subset,
             left_on='patient_id',
             right_on='Patient',
             how='left'
         )
         result_df.drop('Patient', axis=1, inplace=True)
+        
+        # Verify no duplicates created by merge
+        patients_before = len(volume_features_df['patient_id'].unique())
+        patients_after = len(result_df['patient_id'].unique())
+        rows_after = len(result_df)
+        if rows_after != patients_after:
+            print(f"\n  ⚠️ WARNING: Merge created duplicates! {rows_after} rows for {patients_after} patients")
+            print(f"  Deduplicating to keep one row per patient...")
+            result_df = result_df.drop_duplicates(subset='patient_id', keep='first').reset_index(drop=True)
+            print(f"  After deduplication: {len(result_df)} rows")
         
         # Handle missing values PRIMA della normalizzazione
         all_features_to_check = hand_to_add + demo_to_add
@@ -627,7 +624,7 @@ def run_ablation_study(
 def _run_single_experiment(
     config_name: str,
     ablation_config: dict,
-    slice_features_df: pd.DataFrame,
+    volume_features_df: pd.DataFrame,
     patient_features_df: pd.DataFrame,
     kfold_splits: dict,
     base_config: dict,
@@ -833,35 +830,56 @@ def perform_statistical_testing(all_results: dict, results_dir: Path):
 
 def main():
     set_seed(BASE_CONFIG['base_seed'])
-    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progression_maxpooling\third_block_analysis")
+    results_base_dir = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Thesis_training\1_progresion_ct-fm\results2")
     results_base_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load data
+    # Load pre-computed CT-FM embeddings
     print("\n" + "="*70)
-    print("LOADING DATA")
+    print("LOADING PRE-COMPUTED CT-FM EMBEDDINGS")
     print("="*70)
     
-    data_loader = IPFDataLoader(
-        csv_path=BASE_CONFIG['gt_path'],
-        features_path=BASE_CONFIG['patient_features_path'],
-        npy_dir=BASE_CONFIG['ct_scan_path']
-    )
-    patient_data, _ = data_loader.get_patient_data()
+    ctfm_embeddings_path = Path(r"D:\FrancescoP\ImagingBased-ProgressionPrediction\Data_Engineering\CT-FM_extractor\ctfm_embeddings.csv")
     
-    # Extract CNN features
-    print("\n" + "="*70)
-    print("EXTRACTING CTFM 3D VOLUME FEATURES")
-    print("="*70)
+    if not ctfm_embeddings_path.exists():
+        raise FileNotFoundError(f"CT-FM embeddings file not found: {ctfm_embeddings_path}")
     
-    feature_extractor = CTFMFeatureExtractor(
-        hu_min=BASE_CONFIG['ctfm_hu_min'],
-        hu_max=BASE_CONFIG['ctfm_hu_max'],
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    volume_features_df = feature_extractor.extract_features(
-        patient_data=patient_data,
-        save_path=results_base_dir / "volume_features_ctfm.csv"
-    )
+    volume_features_df = pd.read_csv(ctfm_embeddings_path)
+    
+    # Rename 'label' to 'gt_has_progressed' for compatibility
+    if 'label' in volume_features_df.columns:
+        volume_features_df.rename(columns={'label': 'gt_has_progressed'}, inplace=True)
+        print(f"Renamed 'label' column to 'gt_has_progressed'")
+    
+    # Ensure one row per patient (deduplicate if needed)
+    duplicates = volume_features_df['patient_id'].duplicated()
+    if duplicates.any():
+        print(f"⚠️ WARNING: Found {duplicates.sum()} duplicate patient IDs, keeping first occurrence")
+        volume_features_df = volume_features_df.drop_duplicates(subset='patient_id', keep='first').reset_index(drop=True)
+    
+    # Add slice_index column (0 for all since these are patient-level embeddings)
+    if 'slice_index' not in volume_features_df.columns:
+        volume_features_df['slice_index'] = 0
+        print(f"Added 'slice_index' column (all values = 0 for patient-level embeddings)")
+    
+    print(f"Loaded CT-FM embeddings: {volume_features_df.shape}")
+    print(f"Columns ({len(volume_features_df.columns)}): {volume_features_df.columns.tolist()[:5]}...{volume_features_df.columns.tolist()[-3:]}")
+    print(f"Number of unique patients: {volume_features_df['patient_id'].nunique()}")
+    
+    # Verify no duplicates remain
+    assert volume_features_df['patient_id'].nunique() == len(volume_features_df), "Still have duplicate patients!"
+    
+    # Verify feature columns
+    feature_cols = [c for c in volume_features_df.columns if c.startswith('volume_feature_')]
+    print(f"CT-FM features: {len(feature_cols)} dimensions")
+    
+    # Check for any NaN embeddings
+    nan_mask = volume_features_df[feature_cols].isnull().any(axis=1)
+    if nan_mask.any():
+        print(f"⚠️ WARNING: {nan_mask.sum()} patients have NaN embeddings (will be excluded)")
+        volume_features_df = volume_features_df[~nan_mask].reset_index(drop=True)
+        print(f"After filtering: {len(volume_features_df)} patients remaining")
+    
+    print(f"\n✓ Volume features DataFrame ready: {volume_features_df.shape}")
     
     # Load patient features and demographics
     print("\n" + "="*70)

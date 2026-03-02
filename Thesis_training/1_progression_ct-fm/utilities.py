@@ -554,8 +554,8 @@ class PatientSliceDataset(Dataset):
         self.data = features_df[features_df['patient_id'].isin(patient_ids)].copy()
         self.patient_ids = sorted(self.data['patient_id'].unique())
 
-        #Identifica colonne CNN
-        self.cnn_feature_cols = [c for c in self.data.columns if c.startswith('cnn_feature_')]
+        # Identify CNN/volume features (CT-FM embeddings are volume_feature_0..511)
+        self.cnn_feature_cols = [c for c in self.data.columns if c.startswith('volume_feature_')]
         self.cnn_feature_dim = len(self.cnn_feature_cols)
 
 
@@ -708,7 +708,7 @@ def collate_patient_batch(batch: List[Dict]) -> Dict:
     
     return {
         'patient_ids': patient_ids,
-        'cnn_features': padded_cnn_features,  # (batch_size, max_slices, cnn_dim)
+        'volume_features': padded_cnn_features,  # (batch_size, max_slices, volume_dim) - renamed from cnn_features for CT-FM
         'hand_features': hand_features,  # (batch_size, hand_dim) or None
         'demo_features': demo_features,  # (batch_size, demo_dim) or None
         'labels': labels,  # (batch_size,)

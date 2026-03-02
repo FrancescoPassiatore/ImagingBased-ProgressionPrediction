@@ -95,8 +95,10 @@ class FVCPredictionModel(nn.Module):
             fvc_output_dim = 1
         
         # 2. CNN features branch (IMAGE features)
+        # For max_mean pooling, input dimension is doubled (max + mean concatenated)
+        cnn_input_dim = cnn_feature_dim * 2 if pooling_type == 'max_mean' else cnn_feature_dim
         self.cnn_branch = nn.Sequential(
-            nn.Linear(cnn_feature_dim, 512),
+            nn.Linear(cnn_input_dim, 512),
             nn.BatchNorm1d(512) if use_batch_norm else nn.Identity(),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -213,6 +215,24 @@ class FVCPredictionModel(nn.Module):
             
             sum_features = (slice_features * mask).sum(dim=1)  # (batch_size, cnn_dim)
             pooled_cnn = sum_features / lengths.unsqueeze(-1).float()
+            
+        elif self.pooling_type == 'max_mean':
+            # Concatenate max and mean pooling
+            mask = torch.arange(max_slices, device=slice_features.device)[None, :] < lengths[:, None]
+            mask_expanded = mask.unsqueeze(-1)  # (batch_size, max_slices, 1)
+            
+            # Max pooling
+            masked_features = slice_features.clone()
+            masked_features[~mask_expanded.expand_as(slice_features)] = -1e9
+            max_pooled, _ = masked_features.max(dim=1)  # (batch_size, cnn_dim)
+            
+            # Mean pooling
+            mask_float = mask_expanded.float()
+            sum_features = (slice_features * mask_float).sum(dim=1)  # (batch_size, cnn_dim)
+            mean_pooled = sum_features / lengths.unsqueeze(-1).float()
+            
+            # Concatenate
+            pooled_cnn = torch.cat([max_pooled, mean_pooled], dim=1)  # (batch_size, 2*cnn_dim)
             
         elif self.pooling_type == 'attention':
             # Attention-based pooling
