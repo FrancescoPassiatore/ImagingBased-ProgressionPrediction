@@ -1,0 +1,2 @@
+Strategy_1,Strategy_2,Mean_AUC_1,Mean_AUC_2,Mean_Diff,p_value,Significance
+frozen,layer4_only,0.4761616161616161,0.47919191919191917,-0.0030303030303030385,0.3739009663000589,ns

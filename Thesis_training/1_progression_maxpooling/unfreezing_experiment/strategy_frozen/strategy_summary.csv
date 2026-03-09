@@ -1,0 +1,2 @@
+Strategy,Description,Mean_Test_AUC,Std_Test_AUC,Num_Folds
+frozen,Baseline - All layers frozen (current approach),0.4761616161616161,0.05777777777777776,5

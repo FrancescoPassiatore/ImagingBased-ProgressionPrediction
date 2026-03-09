@@ -1,0 +1,2 @@
+Strategy,Description,Mean_Test_AUC,Std_Test_AUC,Num_Folds
+layer4_only,Conservative - Only last residual block (layer4),0.47919191919191917,0.05448406571648506,5

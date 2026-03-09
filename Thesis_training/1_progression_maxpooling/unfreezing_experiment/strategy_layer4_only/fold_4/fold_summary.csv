@@ -1,0 +1,2 @@
+Fold,Strategy,Val_AUC,Test_AUC,Test_Accuracy,Test_F1,Final_Gap,Optimal_Threshold
+4,layer4_only,0.6527777777777777,0.5454545454545454,0.625,0.25,-0.0670677361853832,0.5606065392494202
